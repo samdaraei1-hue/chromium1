@@ -1,0 +1,25 @@
+name: 12 Hour Auto Clicker
+
+on:
+  workflow_dispatch:
+
+jobs:
+  clicker:
+    runs-on: self-hosted
+    timeout-minutes: 750
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: npm install
+      - run: npx playwright install chromium
+
+      - name: Start Browser
+        run: node click.js
+        env:
+          SITE_URL: ${{ secrets.SITE_URL }}
+          TARGET_SELECTOR: ${{ vars.TARGET_SELECTOR }}
