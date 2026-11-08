@@ -1,0 +1,27 @@
+const { chromium } = require('playwright');
+
+async function main() {
+
+    const context = await chromium.launchPersistentContext(
+        './browser-profile',
+        {
+            headless: false,
+            args: ['--start-maximized'],
+            viewport: null
+        }
+    );
+
+    const page = context.pages()[0] ||
+                 await context.newPage();
+
+    await page.goto(process.env.SITE_URL);
+
+    console.log('Browser is ready');
+
+    // Login manually on first run.
+    // Existing session will be reused.
+
+    // Continue with the 12-hour click loop here.
+}
+
+main();
