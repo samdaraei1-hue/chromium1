@@ -1,25 +1,40 @@
-name: 12 Hour Auto Clicker
+
+name: Molab Notebook Automation
 
 on:
   workflow_dispatch:
 
 jobs:
-  clicker:
-    runs-on: self-hosted
-    timeout-minutes: 750
+  molab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - run: npm install
-      - run: npx playwright install chromium
+      - name: Install dependencies
+        run: npm install
 
-      - name: Start Browser
-        run: node click.js
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Restore session
+        shell: bash
         env:
-          SITE_URL: ${{ secrets.SITE_URL }}
-          TARGET_SELECTOR: ${{ vars.TARGET_SELECTOR }}
+          AUTH_STATE: ${{ secrets.AUTH_STATE_BASE64 }}
+        run: |
+          echo "$AUTH_STATE" | base64 --decode > auth.json
+          test -s auth.json
+
+      - name: Run Molab automation
+        run: node click.js
+
+      - name: Remove session file
+        if: always()
+        run: rm -f auth.json
