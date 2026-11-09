@@ -1,39 +1,141 @@
 
 const { chromium } = require('playwright');
 
+const SITE_URL =
+  'https://molab.marimo.io/notebooks/nb_wCrXdw7BuWwmmVTDna76EL';
+
+const INTERVAL = 5 * 60 * 1000;
+const DURATION = 345 * 60 * 1000;
+
+const sleep = ms =>
+  new Promise(resolve => setTimeout(resolve, ms));
+
+async function clickSafeRandom(page) {
+  const viewport = page.viewportSize();
+
+  if (!viewport) return false;
+
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const x = Math.floor(viewport.width * (0.2 + Math.random() * 0.6));
+    const y = Math.floor(viewport.height * (0.2 + Math.random() * 0.6));
+
+    const safe = await page.evaluate(({ x, y }) => {
+      const element = document.elementFromPoint(x, y);
+
+      if (!element) return false;
+
+      const forbidden = [
+        'button',
+        'a',
+        'input',
+        'textarea',
+        'select',
+        'iframe',
+        'canvas',
+        '[role="button"]',
+        '[role="link"]',
+        '[contenteditable="true"]',
+        '.cm-editor',
+        '.monaco-editor',
+        '.CodeMirror',
+        '.jp-Cell',
+        '.marimo-cell-editor',
+        '[data-testid*="cell"]'
+      ].join(',');
+
+      return !element.closest(forbidden);
+    }, { x, y });
+
+    if (safe) {
+      await page.mouse.click(x, y);
+      console.log(`Random click: x=${x}, y=${y}`);
+      return true;
+    }
+  }
+
+  console.log('No safe blank position found; skipping click.');
+  return false;
+}
+
 async function main() {
-    const browser = await chromium.launch({
-        headless: true
+  const browser = await chromium.launch({
+    headless: true
+  });
+
+  const context = await browser.newContext({
+    storageState: 'auth.json',
+    viewport: { width: 1365, height: 900 }
+  });
+
+  const page = await context.newPage();
+
+  try {
+    console.log('Opening Molab...');
+
+    await page.goto(SITE_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000
     });
 
-    const page = await browser.newPage();
+    await page.waitForTimeout(5000);
 
-    try {
-        const url = process.env.SITE_URL;
-        const selector = process.env.TARGET_SELECTOR;
+    // Step 1: Take over if available
+    const takeOver = page.getByRole('button', {
+      name: /take over/i
+    });
 
-        console.log('Opening website:', url);
+    if (await takeOver.count() > 0 &&
+        await takeOver.first().isVisible()) {
 
-        await page.goto(url, {
-            waitUntil: 'domcontentloaded',
-            timeout: 60000
-        });
+      console.log('Reader mode detected. Taking over...');
 
-        await page.waitForSelector(selector, {
-            timeout: 30000
-        });
+      await takeOver.first().click();
 
-        await page.locator(selector).click();
-
-        console.log('Click successful!');
-
-    } catch (error) {
-        console.error('Error:', error);
-        process.exitCode = 1;
-
-    } finally {
-        await browser.close();
+      await page.waitForTimeout(5000);
+    } else {
+      console.log('Take over not required.');
     }
+
+    // Step 2: Run exactly once
+    const runButtons = page.getByRole('button', {
+      name: /^run$/i
+    });
+
+    const runCount = await runButtons.count();
+
+    if (runCount !== 1) {
+      throw new Error(
+        `Expected exactly one Run button, found ${runCount}.`
+      );
+    }
+
+    await runButtons.click();
+
+    console.log('Notebook Run clicked once.');
+
+    // Step 3: Periodic safe clicks
+    const endTime = Date.now() + DURATION;
+
+    while (Date.now() < endTime) {
+      await sleep(INTERVAL);
+
+      if (page.isClosed()) {
+        throw new Error('Notebook page was closed.');
+      }
+
+      await clickSafeRandom(page);
+    }
+
+    console.log('Session duration completed.');
+
+  } catch (error) {
+    console.error('Automation error:', error);
+    process.exitCode = 1;
+
+  } finally {
+    await context.close();
+    await browser.close();
+  }
 }
 
 main();
