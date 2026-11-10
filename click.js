@@ -125,55 +125,24 @@ async function prepareVisualReview(page) {
   console.log('Visual review complete; server execution was not started in this review pass.');
 }
 
-async function restartKernelIfReconnected(page) {
+async function restartIfReconnected(page) {
   const reconnected = page.getByText(/you have reconnected to an existing session/i).first();
   if (!(await reconnected.isVisible().catch(() => false))) {
-    console.log('No reconnected-session banner; skipping kernel restart.');
+    console.log('No reconnected-session banner; skipping restart.');
     return false;
   }
 
-  const menuButton = page.locator('button:has(svg.lucide-menu)').first();
-  await menuButton.waitFor({ state: 'visible', timeout: 10000 });
-  console.log('Reconnected session detected. Opening notebook menu...');
-  await menuButton.click();
-  await page.waitForTimeout(500);
-  await saveScreenshot(page, 'notebook-menu');
-
-  const candidates = [
-    page.getByRole('menuitem', { name: /restart kernel/i }),
-    page.getByRole('button', { name: /restart kernel/i }),
-    page.getByText(/restart kernel/i)
-  ];
-  let restartKernel;
-  for (const candidate of candidates) {
-    const count = await candidate.count().catch(() => 0);
-    for (let index = 0; index < count; index++) {
-      const item = candidate.nth(index);
-      if (await item.isVisible().catch(() => false)) {
-        restartKernel = item;
-        break;
-      }
-    }
-    if (restartKernel) break;
-  }
-
-  if (!restartKernel) {
-    const menuText = await page.locator('body').innerText().catch(() => '');
-    throw new Error(
-      'Opened the notebook menu, but could not find Restart kernel. ' +
-      `Visible page text: ${menuText.replace(/\s+/g, ' ').trim().slice(0, 1500)}`
-    );
-  }
-
-  console.log('Restart kernel menu item found. Clicking it...');
-  await restartKernel.click();
+  const restart = page.getByTestId('restart-session-button');
+  await restart.waitFor({ state: 'visible', timeout: 10000 });
+  console.log('Reconnected session detected. Clicking the blue Restart link...');
+  await restart.click();
 
   const confirmRestart = page.getByRole('button', { name: 'Confirm Restart' });
   await confirmRestart.waitFor({ state: 'visible', timeout: 10000 });
   await saveScreenshot(page, 'restart-confirmation');
   console.log('Confirm Restart button found. Clicking it...');
   await confirmRestart.click();
-  console.log('Kernel restart confirmed. Waiting for the notebook session...');
+  console.log('Restart confirmed. Waiting for the notebook session...');
   await page.waitForTimeout(15000);
   await saveScreenshot(page, 'restart-complete');
 
@@ -265,7 +234,7 @@ async function main() {
       return;
     }
 
-    await restartKernelIfReconnected(page);
+    await restartIfReconnected(page);
 
     // A stopped sandbox has no editor until it is relaunched.
     await recoverNotebook(page);
