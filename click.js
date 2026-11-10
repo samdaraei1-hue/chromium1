@@ -126,7 +126,15 @@ async function prepareVisualReview(page) {
 }
 
 async function restartIfPrompted(page) {
-  const restart = page.getByRole('button', { name: /^restart$/i });
+  const restartTestId = page.getByTestId('restart-session-button');
+  const restartButton = page.getByRole('button', { name: /^restart$/i }).first();
+  const restartText = page.getByText(/^restart$/i).first();
+  const restart = await restartTestId.isVisible().catch(() => false)
+    ? restartTestId
+    : await restartButton.isVisible().catch(() => false)
+      ? restartButton
+      : restartText;
+
   if (!(await restart.isVisible().catch(() => false))) {
     console.log('Restart prompt is not visible.');
     return false;
