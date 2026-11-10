@@ -138,4 +138,47 @@ async function main() {
   }
 }
 
+async function recoverNotebook(page) {
+    const stopped = page.getByText(
+        'Notebook stopped',
+        { exact: true }
+    );
+
+    if (await stopped.count() === 0) {
+        console.log('Notebook is not stopped.');
+        return false;
+    }
+
+    console.log('Stopped sandbox detected.');
+
+    const relaunch = page.getByRole('button', {
+        name: /^relaunch$/i
+    });
+
+    await relaunch.waitFor({
+        state: 'visible',
+        timeout: 15000
+    });
+
+    await relaunch.click();
+
+    console.log('Relaunch clicked.');
+
+    // Wait for the relaunch process.
+    await page.waitForTimeout(15000);
+
+    // Refresh after relaunch.
+    await page.reload({
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
+    });
+
+    await page.waitForTimeout(10000);
+
+    console.log('Notebook page refreshed.');
+
+    return true;
+}
+
+
 main();
