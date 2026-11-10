@@ -57,6 +57,33 @@ async function clickSafeRandom(page) {
   return false;
 }
 
+async function findNotebookEditor(page, timeout = 30000) {
+  const selectors = [
+    '.cm-editor .cm-content',
+    '.cm-content[contenteditable="true"]',
+    '.monaco-editor [contenteditable="true"]',
+    '.CodeMirror textarea',
+    '[data-testid="notebook-cell"] [contenteditable="true"]'
+  ];
+  const deadline = Date.now() + timeout;
+
+  while (Date.now() < deadline) {
+    for (const selector of selectors) {
+      const locator = page.locator(selector).first();
+      if (await locator.isVisible().catch(() => false)) return locator;
+    }
+    await page.waitForTimeout(1000);
+  }
+
+  const bodyText = await page.locator('body').innerText().catch(() => '');
+  const excerpt = bodyText.replace(/\s+/g, ' ').trim().slice(0, 1200);
+  throw new Error(
+    `Notebook editor did not appear. URL: ${page.url()} | ` +
+    `Title: ${await page.title().catch(() => 'unavailable')} | ` +
+    `Visible page text: ${excerpt || '(empty)'}`
+  );
+}
+
 async function main() {
   const browser = await chromium.launch({
     headless: true
@@ -96,19 +123,15 @@ async function main() {
       console.log('Take over not required.');
     }
 
+    // A stopped sandbox has no editor until it is relaunched.
+    await recoverNotebook(page);
+
     // Step 2: Run exactly once
 
     console.log('Preparing notebook execution...');
 
     // Focus the notebook editor
-    const editor = page.locator(
-        '.cm-editor .cm-content'
-    ).first();
-
-    await editor.waitFor({
-        state: 'visible',
-        timeout: 30000
-    });
+    const editor = await findNotebookEditor(page, 60000);
 
     await editor.click();
 
@@ -146,12 +169,9 @@ async function main() {
 }
 
 async function recoverNotebook(page) {
-    const stopped = page.getByText(
-        'Notebook stopped',
-        { exact: true }
-    );
+    const stopped = page.getByText(/notebook stopped/i).first();
 
-    if (await stopped.count() === 0) {
+    if (!(await stopped.isVisible().catch(() => false))) {
         console.log('Notebook is not stopped.');
         return false;
     }
@@ -162,27 +182,16 @@ async function recoverNotebook(page) {
         name: /^relaunch$/i
     });
 
-    await relaunch.waitFor({
-        state: 'visible',
-        timeout: 15000
-    });
+    await relaunch.waitFor({ state: 'visible', timeout: 15000 });
 
     await relaunch.click();
 
     console.log('Relaunch clicked.');
 
-    // Wait for the relaunch process.
+    // Let the app rebuild the notebook in place. Reloading here can interrupt it.
     await page.waitForTimeout(15000);
-
-    // Refresh after relaunch.
-    await page.reload({
-        waitUntil: 'domcontentloaded',
-        timeout: 60000
-    });
-
-    await page.waitForTimeout(10000);
-
-    console.log('Notebook page refreshed.');
+    await findNotebookEditor(page, 60000);
+    console.log('Notebook editor is available after relaunch.');
 
     return true;
 }
