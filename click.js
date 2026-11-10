@@ -1,5 +1,6 @@
 
 const { chromium } = require('playwright');
+const fs = require('node:fs');
 
 const SITE_URL =
   'https://molab.marimo.io/notebooks/nb_wCrXdw7BuWwmmVTDna76EL';
@@ -95,6 +96,7 @@ async function startReadOnlyPreview(page) {
   const runNow = page.getByRole('button', { name: /^run it now$/i });
   await runNow.waitFor({ state: 'visible', timeout: 15000 });
   await runNow.click();
+  await saveScreenshot(page, 'server-confirmation');
 
   const runOnServer = page.getByRole('button', { name: /^run on server$/i });
   await runOnServer.waitFor({ state: 'visible', timeout: 30000 });
@@ -102,13 +104,38 @@ async function startReadOnlyPreview(page) {
   await runOnServer.click();
 
   await page.waitForTimeout(5000);
+  await saveScreenshot(page, 'server-started');
   console.log('Notebook run on server was started.');
   return true;
 }
 
+async function prepareVisualReview(page) {
+  const previewNotice = page.getByText(/read-only preview/i).first();
+  if (!(await previewNotice.isVisible().catch(() => false))) {
+    console.log('Read-only preview message was not visible for review.');
+    return;
+  }
+
+  const runNow = page.getByRole('button', { name: /^run it now$/i });
+  await runNow.waitFor({ state: 'visible', timeout: 15000 });
+  await runNow.click();
+  await page.getByRole('button', { name: /^run on server$/i })
+    .waitFor({ state: 'visible', timeout: 30000 });
+  await saveScreenshot(page, 'server-confirmation');
+  console.log('Visual review complete; server execution was not started in this review pass.');
+}
+
+async function saveScreenshot(page, name) {
+  const path = `artifacts/${name}.png`;
+  await page.screenshot({ path, fullPage: true });
+  console.log(`Screenshot saved: ${path}`);
+}
+
 async function main() {
+  fs.mkdirSync('artifacts', { recursive: true });
+
   const browser = await chromium.launch({
-    headless: true
+    headless: false
   });
 
   const context = await browser.newContext({
@@ -127,6 +154,7 @@ async function main() {
     });
 
     await page.waitForTimeout(5000);
+    await saveScreenshot(page, 'notebook-opened');
 
     // Step 1: Take over if available
     const takeOver = page.getByRole('button', {
@@ -143,6 +171,11 @@ async function main() {
       await page.waitForTimeout(5000);
     } else {
       console.log('Take over not required.');
+    }
+
+    if (process.argv.includes('--visual-review')) {
+      await prepareVisualReview(page);
+      return;
     }
 
     // A stopped sandbox has no editor until it is relaunched.
@@ -187,6 +220,9 @@ async function main() {
 
   } catch (error) {
     console.error('Automation error:', error);
+    await saveScreenshot(page, 'error').catch(screenshotError => {
+      console.error('Could not save error screenshot:', screenshotError.message);
+    });
     process.exitCode = 1;
 
   } finally {

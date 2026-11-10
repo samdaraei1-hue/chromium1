@@ -32,8 +32,29 @@ jobs:
           echo "$AUTH_STATE" | base64 --decode > auth.json
           test -s auth.json
 
+      - name: Capture browser preview
+        run: xvfb-run -a node click.js --visual-review
+
+      - name: Upload browser preview
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: molab-browser-preview
+          path: artifacts/*.png
+          if-no-files-found: ignore
+          retention-days: 1
+
       - name: Run Molab automation
-        run: node click.js
+        run: xvfb-run -a node click.js
+
+      - name: Upload browser screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: molab-browser-screenshots
+          path: artifacts/*.png
+          if-no-files-found: ignore
+          retention-days: 1
 
       - name: Remove session file
         if: always()
