@@ -76,12 +76,34 @@ async function findNotebookEditor(page, timeout = 30000) {
   }
 
   const bodyText = await page.locator('body').innerText().catch(() => '');
-  const excerpt = bodyText.replace(/\s+/g, ' ').trim().slice(0, 1200);
+  const excerpt = bodyText.replace(/\s+/g, ' ').trim().slice(0, 2000);
+  const buttons = await page.getByRole('button').allTextContents().catch(() => []);
   throw new Error(
     `Notebook editor did not appear. URL: ${page.url()} | ` +
     `Title: ${await page.title().catch(() => 'unavailable')} | ` +
+    `Buttons: ${buttons.map(text => text.trim()).filter(Boolean).join(' | ') || '(none)'} | ` +
     `Visible page text: ${excerpt || '(empty)'}`
   );
+}
+
+async function startReadOnlyPreview(page) {
+  const previewNotice = page.getByText(/read-only preview/i).first();
+  if (!(await previewNotice.isVisible().catch(() => false))) return false;
+
+  console.log('Read-only preview detected. Starting notebook on Molab server...');
+
+  const runNow = page.getByRole('button', { name: /^run it now$/i });
+  await runNow.waitFor({ state: 'visible', timeout: 15000 });
+  await runNow.click();
+
+  const runOnServer = page.getByRole('button', { name: /^run on server$/i });
+  await runOnServer.waitFor({ state: 'visible', timeout: 30000 });
+  console.log('Server confirmation dialog is open. Confirming run on server.');
+  await runOnServer.click();
+
+  await page.waitForTimeout(5000);
+  console.log('Notebook run on server was started.');
+  return true;
 }
 
 async function main() {
@@ -126,22 +148,27 @@ async function main() {
     // A stopped sandbox has no editor until it is relaunched.
     await recoverNotebook(page);
 
+    // Read-only previews execute from the server confirmation dialog and have no editor.
+    const previewStarted = await startReadOnlyPreview(page);
+
     // Step 2: Run exactly once
 
-    console.log('Preparing notebook execution...');
+    if (!previewStarted) {
+      console.log('Preparing notebook execution...');
 
-    // Focus the notebook editor
-    const editor = await findNotebookEditor(page, 60000);
+      // Focus the notebook editor
+      const editor = await findNotebookEditor(page, 20000);
 
-    await editor.click();
+      await editor.click();
 
-    // Run all stale cells once
-    await page.keyboard.press('Control+Shift+R');
+      // Run all stale cells once
+      await page.keyboard.press('Control+Shift+R');
 
-    console.log('Run all shortcut sent successfully.');
+      console.log('Run all shortcut sent successfully.');
 
 
-    console.log('Notebook Run clicked once.');
+      console.log('Notebook Run clicked once.');
+    }
 
     // Step 3: Periodic safe clicks
     const endTime = Date.now() + DURATION;
