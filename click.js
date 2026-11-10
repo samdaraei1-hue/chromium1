@@ -11,6 +11,32 @@ const DURATION = 345 * 60 * 1000;
 const sleep = ms =>
   new Promise(resolve => setTimeout(resolve, ms));
 
+async function findVisibleAcrossFrames(page, locatorFactory, timeout = 0) {
+  const deadline = Date.now() + timeout;
+
+  do {
+    for (const frame of page.frames()) {
+      const candidates = locatorFactory(frame);
+      const count = await candidates.count().catch(() => 0);
+
+      for (let index = 0; index < count; index++) {
+        const locator = candidates.nth(index);
+        if (await locator.isVisible().catch(() => false)) {
+          if (frame !== page.mainFrame()) {
+            console.log(`Found target in iframe: ${frame.url()}`);
+          }
+          return { locator, frame };
+        }
+      }
+    }
+
+    if (Date.now() >= deadline) break;
+    await page.waitForTimeout(500);
+  } while (Date.now() < deadline);
+
+  return null;
+}
+
 async function clickSafeRandom(page) {
   const viewport = page.viewportSize();
 
@@ -69,21 +95,36 @@ async function findNotebookEditor(page, timeout = 30000) {
   const deadline = Date.now() + timeout;
 
   while (Date.now() < deadline) {
-    for (const selector of selectors) {
-      const locator = page.locator(selector).first();
-      if (await locator.isVisible().catch(() => false)) return locator;
+    for (const frame of page.frames()) {
+      for (const selector of selectors) {
+        const candidates = frame.locator(selector);
+        const count = await candidates.count().catch(() => 0);
+        for (let index = 0; index < count; index++) {
+          const editor = candidates.nth(index);
+          if (await editor.isVisible().catch(() => false)) {
+            if (frame !== page.mainFrame()) {
+              console.log(`Found notebook editor in iframe: ${frame.url()}`);
+            }
+            return editor;
+          }
+        }
+      }
     }
     await page.waitForTimeout(1000);
   }
 
-  const bodyText = await page.locator('body').innerText().catch(() => '');
-  const excerpt = bodyText.replace(/\s+/g, ' ').trim().slice(0, 2000);
-  const buttons = await page.getByRole('button').allTextContents().catch(() => []);
+  const frameDetails = await Promise.all(page.frames().map(async frame => {
+    const bodyText = await frame.locator('body').innerText().catch(() => '');
+    return `${frame.url()}: ${bodyText.replace(/\s+/g, ' ').trim().slice(0, 700)}`;
+  }));
+  const buttons = await Promise.all(page.frames().map(frame =>
+    frame.getByRole('button').allTextContents().catch(() => [])
+  ));
   throw new Error(
     `Notebook editor did not appear. URL: ${page.url()} | ` +
     `Title: ${await page.title().catch(() => 'unavailable')} | ` +
-    `Buttons: ${buttons.map(text => text.trim()).filter(Boolean).join(' | ') || '(none)'} | ` +
-    `Visible page text: ${excerpt || '(empty)'}`
+    `Buttons: ${buttons.flat().map(text => text.trim()).filter(Boolean).join(' | ') || '(none)'} | ` +
+    `Frames: ${frameDetails.join(' || ') || '(none)'}`
   );
 }
 
@@ -126,29 +167,33 @@ async function prepareVisualReview(page) {
 }
 
 async function restartIfReconnected(page) {
-  const restartButtons = page.locator('[data-testid="restart-session-button"]:visible');
-  const restartAppeared = await restartButtons.first()
-    .waitFor({ state: 'visible', timeout: 10000 })
-    .then(() => true)
-    .catch(() => false);
+  const restartTarget = await findVisibleAcrossFrames(
+    page,
+    frame => frame.getByTestId('restart-session-button'),
+    10000
+  );
 
-  if (!restartAppeared) {
-    const matchCount = await page.getByTestId('restart-session-button').count().catch(() => 0);
-    console.log(`Blue Restart link did not become visible (${matchCount} matching elements). Skipping restart.`);
+  if (!restartTarget) {
+    console.log('Blue Restart link was not found in the page or any iframe. Skipping restart.');
     return false;
   }
 
-  const restart = restartButtons.first();
   console.log('Blue Restart link found. Taking a screenshot before clicking...');
   await saveScreenshot(page, 'restart-banner');
   console.log('Clicking the blue Restart link...');
-  await restart.click();
+  await restartTarget.locator.click();
 
-  const confirmRestart = page.getByRole('button', { name: 'Confirm Restart' });
-  await confirmRestart.waitFor({ state: 'visible', timeout: 10000 });
+  const confirmTarget = await findVisibleAcrossFrames(
+    page,
+    frame => frame.getByRole('button', { name: 'Confirm Restart' }),
+    10000
+  );
+  if (!confirmTarget) {
+    throw new Error('Clicked blue Restart, but Confirm Restart did not appear in the page or any iframe.');
+  }
   await saveScreenshot(page, 'restart-confirmation');
   console.log('Confirm Restart button found. Clicking it...');
-  await confirmRestart.click();
+  await confirmTarget.locator.click();
   console.log('Restart confirmed. Waiting for the notebook session...');
   await page.waitForTimeout(15000);
   await saveScreenshot(page, 'restart-complete');
@@ -167,19 +212,23 @@ async function restartIfReconnected(page) {
 }
 
 async function takeOverIfReader(page) {
-  const takeoverByTestId = page.getByTestId('takeover-button');
-  const takeoverByRole = page.getByRole('button', { name: /take over/i }).first();
-  const takeover = await takeoverByTestId.isVisible().catch(() => false)
-    ? takeoverByTestId
-    : takeoverByRole;
+  const takeoverTarget = await findVisibleAcrossFrames(
+    page,
+    frame => frame.getByTestId('takeover-button'),
+    2000
+  ) || await findVisibleAcrossFrames(
+    page,
+    frame => frame.getByRole('button', { name: /take over/i }),
+    0
+  );
 
-  if (!(await takeover.isVisible().catch(() => false))) {
-    console.log('Reader-mode Take over button is not visible.');
+  if (!takeoverTarget) {
+    console.log('Reader-mode Take over button is not visible in the page or any iframe.');
     return false;
   }
 
   console.log('Reader mode detected. Clicking Take over...');
-  await takeover.click();
+  await takeoverTarget.locator.click();
   const reconnectBanner = page.getByText(/you have reconnected to an existing session/i).first();
   const bannerAppeared = await reconnectBanner
     .waitFor({ state: 'visible', timeout: 10000 })
