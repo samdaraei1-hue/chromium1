@@ -126,16 +126,26 @@ async function prepareVisualReview(page) {
 }
 
 async function restartIfReconnected(page) {
-  const reconnected = page.getByText(/you have reconnected to an existing session/i).first();
-  const bannerVisible = await reconnected.isVisible().catch(() => false);
-  if (!bannerVisible) {
-    console.log('No reconnected-session banner; skipping restart.');
+  const restartButtons = page.getByTestId('restart-session-button');
+  const restartCount = await restartButtons.count().catch(() => 0);
+  let restart;
+
+  for (let index = 0; index < restartCount; index++) {
+    const candidate = restartButtons.nth(index);
+    if (await candidate.isVisible().catch(() => false)) {
+      restart = candidate;
+      break;
+    }
+  }
+
+  if (!restart) {
+    console.log(`Blue Restart link is not visible (${restartCount} matching elements). Skipping restart.`);
     return false;
   }
 
-  const restart = page.getByTestId('restart-session-button');
-  await restart.waitFor({ state: 'visible', timeout: 10000 });
-  console.log('Reconnected session detected. Clicking the blue Restart link...');
+  console.log('Blue Restart link found. Taking a screenshot before clicking...');
+  await saveScreenshot(page, 'restart-banner');
+  console.log('Clicking the blue Restart link...');
   await restart.click();
 
   const confirmRestart = page.getByRole('button', { name: 'Confirm Restart' });
