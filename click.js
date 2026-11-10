@@ -145,6 +145,28 @@ async function main() {
 
   const page = await context.newPage();
 
+  page.on('pageerror', error => {
+    console.error(`[browser page error] ${error.message}`);
+  });
+  page.on('console', message => {
+    if (message.type() === 'error') {
+      console.error(`[browser console error] ${message.text()}`);
+    }
+  });
+  page.on('requestfailed', request => {
+    const url = new URL(request.url());
+    console.error(
+      `[request failed] ${url.origin}${url.pathname} | ` +
+      `${request.failure()?.errorText || 'unknown error'}`
+    );
+  });
+  page.on('response', response => {
+    if (response.status() >= 400) {
+      const url = new URL(response.url());
+      console.error(`[HTTP ${response.status()}] ${url.origin}${url.pathname}`);
+    }
+  });
+
   try {
     console.log('Opening Molab...');
 
