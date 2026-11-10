@@ -125,6 +125,20 @@ async function prepareVisualReview(page) {
   console.log('Visual review complete; server execution was not started in this review pass.');
 }
 
+async function restartIfPrompted(page) {
+  const restart = page.getByRole('button', { name: /^restart$/i });
+  if (!(await restart.isVisible().catch(() => false))) {
+    console.log('Restart prompt is not visible.');
+    return false;
+  }
+
+  console.log('Restart prompt detected. Clicking Restart...');
+  await restart.click();
+  await saveScreenshot(page, 'restart-clicked');
+  await page.waitForTimeout(15000);
+  return true;
+}
+
 async function saveScreenshot(page, name) {
   const path = `artifacts/${name}.png`;
   await page.screenshot({ path, fullPage: true });
@@ -194,6 +208,8 @@ async function main() {
     } else {
       console.log('Take over not required.');
     }
+
+    await restartIfPrompted(page);
 
     if (process.argv.includes('--visual-review')) {
       await prepareVisualReview(page);
