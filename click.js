@@ -139,20 +139,39 @@ async function restartKernelIfReconnected(page) {
   await page.waitForTimeout(500);
   await saveScreenshot(page, 'notebook-menu');
 
-  const restartMenuItem = page.getByRole('menuitem', { name: /restart kernel/i }).first();
-  const restartButton = page.getByRole('button', { name: /restart kernel/i }).first();
-  const restartText = page.getByText(/^restart kernel$/i).first();
-  const restartKernel = await restartMenuItem.isVisible().catch(() => false)
-    ? restartMenuItem
-    : await restartButton.isVisible().catch(() => false)
-      ? restartButton
-      : restartText;
-  await restartKernel.waitFor({ state: 'visible', timeout: 10000 });
+  const candidates = [
+    page.getByRole('menuitem', { name: /restart kernel/i }),
+    page.getByRole('button', { name: /restart kernel/i }),
+    page.getByText(/restart kernel/i)
+  ];
+  let restartKernel;
+  for (const candidate of candidates) {
+    const count = await candidate.count().catch(() => 0);
+    for (let index = 0; index < count; index++) {
+      const item = candidate.nth(index);
+      if (await item.isVisible().catch(() => false)) {
+        restartKernel = item;
+        break;
+      }
+    }
+    if (restartKernel) break;
+  }
+
+  if (!restartKernel) {
+    const menuText = await page.locator('body').innerText().catch(() => '');
+    throw new Error(
+      'Opened the notebook menu, but could not find Restart kernel. ' +
+      `Visible page text: ${menuText.replace(/\s+/g, ' ').trim().slice(0, 1500)}`
+    );
+  }
+
+  console.log('Restart kernel menu item found. Clicking it...');
   await restartKernel.click();
 
   const confirmRestart = page.getByRole('button', { name: 'Confirm Restart' });
   await confirmRestart.waitFor({ state: 'visible', timeout: 10000 });
   await saveScreenshot(page, 'restart-confirmation');
+  console.log('Confirm Restart button found. Clicking it...');
   await confirmRestart.click();
   console.log('Kernel restart confirmed. Waiting for the notebook session...');
   await page.waitForTimeout(15000);
