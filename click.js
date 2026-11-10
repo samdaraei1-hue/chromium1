@@ -97,19 +97,26 @@ async function main() {
     }
 
     // Step 2: Run exactly once
-    const runButtons = page.getByRole('button', {
-      name: /^run$/i
+
+    console.log('Preparing notebook execution...');
+
+    // Focus the notebook editor
+    const editor = page.locator(
+        '.cm-editor .cm-content'
+    ).first();
+
+    await editor.waitFor({
+        state: 'visible',
+        timeout: 30000
     });
 
-    const runCount = await runButtons.count();
+    await editor.click();
 
-    if (runCount !== 1) {
-      throw new Error(
-        `Expected exactly one Run button, found ${runCount}.`
-      );
-    }
+    // Run all stale cells once
+    await page.keyboard.press('Control+Shift+R');
 
-    await runButtons.click();
+    console.log('Run all shortcut sent successfully.');
+
 
     console.log('Notebook Run clicked once.');
 
