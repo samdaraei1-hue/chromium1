@@ -125,28 +125,36 @@ async function prepareVisualReview(page) {
   console.log('Visual review complete; server execution was not started in this review pass.');
 }
 
-async function restartIfPrompted(page) {
-  const restartTestId = page.getByTestId('restart-session-button');
-  const restartButton = page.getByRole('button', { name: /^restart$/i }).first();
-  const restartText = page.getByText(/^restart$/i).first();
-  const restart = await restartTestId.isVisible().catch(() => false)
-    ? restartTestId
-    : await restartButton.isVisible().catch(() => false)
-      ? restartButton
-      : restartText;
-
-  if (!(await restart.isVisible().catch(() => false))) {
-    console.log('Restart prompt is not visible.');
+async function restartKernelIfReconnected(page) {
+  const reconnected = page.getByText(/you have reconnected to an existing session/i).first();
+  if (!(await reconnected.isVisible().catch(() => false))) {
+    console.log('No reconnected-session banner; skipping kernel restart.');
     return false;
   }
 
-  console.log('Restart prompt detected. Clicking Restart...');
-  await restart.click();
+  const menuButton = page.locator('button:has(svg.lucide-menu)').first();
+  await menuButton.waitFor({ state: 'visible', timeout: 10000 });
+  console.log('Reconnected session detected. Opening notebook menu...');
+  await menuButton.click();
+  await page.waitForTimeout(500);
+  await saveScreenshot(page, 'notebook-menu');
+
+  const restartMenuItem = page.getByRole('menuitem', { name: /restart kernel/i }).first();
+  const restartButton = page.getByRole('button', { name: /restart kernel/i }).first();
+  const restartText = page.getByText(/^restart kernel$/i).first();
+  const restartKernel = await restartMenuItem.isVisible().catch(() => false)
+    ? restartMenuItem
+    : await restartButton.isVisible().catch(() => false)
+      ? restartButton
+      : restartText;
+  await restartKernel.waitFor({ state: 'visible', timeout: 10000 });
+  await restartKernel.click();
+
   const confirmRestart = page.getByRole('button', { name: 'Confirm Restart' });
   await confirmRestart.waitFor({ state: 'visible', timeout: 10000 });
   await saveScreenshot(page, 'restart-confirmation');
   await confirmRestart.click();
-  console.log('Restart confirmed. Waiting for the notebook session...');
+  console.log('Kernel restart confirmed. Waiting for the notebook session...');
   await page.waitForTimeout(15000);
   await saveScreenshot(page, 'restart-complete');
 
@@ -233,12 +241,12 @@ async function main() {
       console.log('Take over not required.');
     }
 
-    await restartIfPrompted(page);
-
     if (process.argv.includes('--visual-review')) {
       await prepareVisualReview(page);
       return;
     }
+
+    await restartKernelIfReconnected(page);
 
     // A stopped sandbox has no editor until it is relaunched.
     await recoverNotebook(page);
