@@ -126,23 +126,19 @@ async function prepareVisualReview(page) {
 }
 
 async function restartIfReconnected(page) {
-  const restartButtons = page.getByTestId('restart-session-button');
-  const restartCount = await restartButtons.count().catch(() => 0);
-  let restart;
+  const restartButtons = page.locator('[data-testid="restart-session-button"]:visible');
+  const restartAppeared = await restartButtons.first()
+    .waitFor({ state: 'visible', timeout: 10000 })
+    .then(() => true)
+    .catch(() => false);
 
-  for (let index = 0; index < restartCount; index++) {
-    const candidate = restartButtons.nth(index);
-    if (await candidate.isVisible().catch(() => false)) {
-      restart = candidate;
-      break;
-    }
-  }
-
-  if (!restart) {
-    console.log(`Blue Restart link is not visible (${restartCount} matching elements). Skipping restart.`);
+  if (!restartAppeared) {
+    const matchCount = await page.getByTestId('restart-session-button').count().catch(() => 0);
+    console.log(`Blue Restart link did not become visible (${matchCount} matching elements). Skipping restart.`);
     return false;
   }
 
+  const restart = restartButtons.first();
   console.log('Blue Restart link found. Taking a screenshot before clicking...');
   await saveScreenshot(page, 'restart-banner');
   console.log('Clicking the blue Restart link...');
