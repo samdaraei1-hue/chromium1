@@ -2,14 +2,28 @@
 const { chromium } = require('playwright');
 const fs = require('node:fs');
 
-const SITE_URL =
-  'https://molab.marimo.io/notebooks/nb_wCrXdw7BuWwmmVTDna76EL';
+const NOTEBOOK_URLS = [
+  'https://molab.marimo.io/notebooks/nb_wCrXdw7BuWwmmVTDna76EL',
+  'https://molab.marimo.io/notebooks/nb_qmw8E5jTejuvsnpC8anUqq'
+];
 
 const INTERVAL = 5 * 60 * 1000;
 const DURATION = 345 * 60 * 1000;
 
 const sleep = ms =>
   new Promise(resolve => setTimeout(resolve, ms));
+
+function redactLogText(value) {
+  return value
+    .replace(/(bearer\s+)[A-Za-z0-9._~+\/-]+=*/gi, '$1[redacted]')
+    .replace(/((?:token|secret|password|api[_ -]?key|auth(?:entication)?)["'\s:=]+)[^\s,;"']+/gi, '$1[redacted]');
+}
+
+function appendLog(notebookNumber, message) {
+  const entry = `[${new Date().toISOString()}] [notebook ${notebookNumber}] ${redactLogText(message)}`;
+  console.log(`[notebook ${notebookNumber} log] ${redactLogText(message)}`);
+  fs.appendFileSync('artifacts/notebook-logs.txt', `${entry}\n`, 'utf8');
+}
 
 function safeUrlForLog(rawUrl) {
   try {
@@ -90,8 +104,78 @@ async function clickSafeRandom(page) {
     }
   }
 
-  console.log('No safe blank position found; skipping click.');
+  console.log('No safe blank position found; trying right-click then Escape at random points.');
+
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const x = Math.floor(viewport.width * (0.2 + Math.random() * 0.6));
+    const y = Math.floor(viewport.height * (0.2 + Math.random() * 0.6));
+
+    await page.mouse.click(x, y, { button: 'right' });
+    await page.waitForTimeout(150);
+    await page.keyboard.press('Escape');
+    console.log(`Dismissed context menu at x=${x}, y=${y} with Escape.`);
+  }
+
+  return true;
+}
+
+async function openLogsPanel(page, notebookNumber) {
+  // marimo's developer panel is toggled with Ctrl/Cmd+J. The Logs tab exposes
+  // stdout/stderr from notebook cells.
+  await page.keyboard.press('Control+j').catch(() => {});
+  await page.waitForTimeout(500);
+  const logsTab = await findVisibleAcrossFrames(page, frame =>
+    frame.getByRole('tab', { name: /^logs$/i })
+      .or(frame.getByRole('button', { name: /^logs$/i }))
+      .or(frame.getByText(/^logs$/i)), 3000);
+  if (logsTab) {
+    await logsTab.locator.click().catch(() => {});
+    console.log(`Opened the Logs panel for notebook ${notebookNumber}.`);
+    return true;
+  }
+  console.log(`Logs tab was not discoverable for notebook ${notebookNumber}; will inspect visible notebook outputs.`);
   return false;
+}
+
+async function readNotebookLogs(page) {
+  for (const frame of page.frames()) {
+    const panels = frame.locator('[role="tabpanel"]:visible');
+    const count = await panels.count().catch(() => 0);
+    for (let i = count - 1; i >= 0; i--) {
+      const text = (await panels.nth(i).innerText().catch(() => '')).trim();
+      if (text) return text;
+    }
+  }
+  return '';
+}
+
+async function reportNewLogs(page, notebookNumber, state) {
+  const snapshot = await readNotebookLogs(page);
+  if (!snapshot || snapshot === state.lastSnapshot) return;
+  const newText = snapshot.startsWith(state.lastSnapshot)
+    ? snapshot.slice(state.lastSnapshot.length).trim()
+    : snapshot;
+  state.lastSnapshot = snapshot;
+  if (!newText) return;
+
+  for (const line of newText.split(/\r?\n/).map(line => line.trim()).filter(Boolean)) {
+    appendLog(notebookNumber, line);
+  }
+}
+
+function attachBrowserDiagnostics(page, notebookNumber) {
+  page.on('pageerror', error => {
+    appendLog(notebookNumber, `[browser page error] ${error.message}`);
+  });
+  page.on('console', message => {
+    if (message.type() === 'error') appendLog(notebookNumber, `[browser console error] ${message.text()}`);
+  });
+  page.on('requestfailed', request => {
+    appendLog(notebookNumber, `[request failed] ${safeUrlForLog(request.url())} | ${request.failure()?.errorText || 'unknown error'}`);
+  });
+  page.on('response', response => {
+    if (response.status() >= 400) appendLog(notebookNumber, `[HTTP ${response.status()}] ${safeUrlForLog(response.url())}`);
+  });
 }
 
 async function findNotebookEditor(page, timeout = 30000) {
@@ -285,6 +369,7 @@ async function saveScreenshot(page, name) {
 
 async function main() {
   fs.mkdirSync('artifacts', { recursive: true });
+  fs.writeFileSync('artifacts/notebook-logs.txt', '', 'utf8');
 
   const browser = await chromium.launch({
     headless: false
@@ -295,93 +380,70 @@ async function main() {
     viewport: { width: 1365, height: 900 }
   });
 
-  const page = await context.newPage();
-
-  page.on('pageerror', error => {
-    console.error(`[browser page error] ${error.message}`);
-  });
-  page.on('console', message => {
-    if (message.type() === 'error') {
-      console.error(`[browser console error] ${message.text()}`);
-    }
-  });
-  page.on('requestfailed', request => {
-    console.error(
-      `[request failed] ${safeUrlForLog(request.url())} | ` +
-      `${request.failure()?.errorText || 'unknown error'}`
-    );
-  });
-  page.on('response', response => {
-    if (response.status() >= 400) {
-      console.error(`[HTTP ${response.status()}] ${safeUrlForLog(response.url())}`);
-    }
-  });
+  const notebooks = [];
 
   try {
-    console.log('Opening Molab...');
+    for (let index = 0; index < NOTEBOOK_URLS.length; index++) {
+      const notebookNumber = index + 1;
+      const page = await context.newPage();
+      const state = { lastSnapshot: '' };
+      attachBrowserDiagnostics(page, notebookNumber);
+      notebooks.push({ page, state, notebookNumber });
 
-    await page.goto(SITE_URL, {
-      waitUntil: 'domcontentloaded',
-      timeout: 60000
-    });
+      console.log(`Opening Molab notebook ${notebookNumber}/${NOTEBOOK_URLS.length}: ${NOTEBOOK_URLS[index]}`);
+      await page.goto(NOTEBOOK_URLS[index], { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.waitForTimeout(5000);
+      await saveScreenshot(page, `notebook-${notebookNumber}-opened`);
+      await takeOverIfReader(page);
 
-    await page.waitForTimeout(5000);
-    await saveScreenshot(page, 'notebook-opened');
-
-    await takeOverIfReader(page);
-
-    if (process.argv.includes('--visual-review')) {
-      await prepareVisualReview(page);
-      return;
-    }
-
-    await restartIfReconnected(page);
-
-    // A stopped sandbox has no editor until it is relaunched.
-    await recoverNotebook(page);
-
-    // Read-only previews execute from the server confirmation dialog and have no editor.
-    const previewStarted = await startReadOnlyPreview(page);
-
-    // Step 2: Run exactly once
-
-    if (!previewStarted) {
-      console.log('Preparing notebook execution...');
-
-      // Focus the notebook editor
-      const editor = await findNotebookEditor(page, 20000);
-
-      await editor.click();
-
-      // Run all stale cells once
-      await page.keyboard.press('Control+Shift+R');
-
-      console.log('Run all shortcut sent successfully.');
-
-
-      console.log('Notebook Run clicked once.');
-    }
-
-    // Step 3: Periodic safe clicks
-    const endTime = Date.now() + DURATION;
-
-    while (Date.now() < endTime) {
-      await sleep(INTERVAL);
-
-      if (page.isClosed()) {
-        throw new Error('Notebook page was closed.');
+      if (process.argv.includes('--visual-review')) {
+        await prepareVisualReview(page);
+        continue;
       }
 
-      await clickSafeRandom(page);
+      await restartIfReconnected(page);
+      await recoverNotebook(page);
+      const previewStarted = await startReadOnlyPreview(page);
+
+      if (!previewStarted) {
+        console.log(`Preparing notebook ${notebookNumber} execution...`);
+        const editor = await findNotebookEditor(page, 20000);
+        await editor.click();
+        await page.keyboard.press('Control+Shift+R');
+        console.log(`Notebook ${notebookNumber}: Run all shortcut sent.`);
+      }
+
+      await openLogsPanel(page, notebookNumber);
+      await reportNewLogs(page, notebookNumber, state);
+    }
+
+    if (process.argv.includes('--visual-review')) return;
+
+    // Keep every notebook tab alive, poll its Logs panel, and perform the
+    // requested harmless right-click/Escape fallback when no safe blank spot exists.
+    const endTime = Date.now() + DURATION;
+    const lastClickAt = new Map(notebooks.map(item => [item.notebookNumber, Date.now()]));
+    while (Date.now() < endTime) {
+      await sleep(10000);
+      for (const { page, state, notebookNumber } of notebooks) {
+        if (page.isClosed()) throw new Error(`Notebook ${notebookNumber} page was closed.`);
+        await reportNewLogs(page, notebookNumber, state);
+        if (Date.now() - lastClickAt.get(notebookNumber) >= INTERVAL) {
+          await clickSafeRandom(page);
+          lastClickAt.set(notebookNumber, Date.now());
+        }
+      }
     }
 
     console.log('Session duration completed.');
 
   } catch (error) {
     console.error('Automation error:', error);
-    await saveScreenshot(page, 'error').catch(screenshotError => {
-      console.error('Could not save error screenshot:', screenshotError.message);
-    });
+    for (const { page, notebookNumber } of notebooks) {
+      await saveScreenshot(page, `notebook-${notebookNumber}-error`).catch(screenshotError => {
+        console.error('Could not save error screenshot:', screenshotError.message);
+      });
+    }
     process.exitCode = 1;
 
   } finally {

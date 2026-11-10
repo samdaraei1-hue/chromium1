@@ -51,8 +51,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: molab-browser-screenshots
-          path: artifacts/*.png
+          name: molab-run-logs-and-screenshots
+          path: artifacts/*
           if-no-files-found: ignore
           retention-days: 1
 
