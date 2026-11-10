@@ -142,8 +142,24 @@ async function restartIfPrompted(page) {
 
   console.log('Restart prompt detected. Clicking Restart...');
   await restart.click();
-  await saveScreenshot(page, 'restart-clicked');
+  const confirmRestart = page.getByRole('button', { name: 'Confirm Restart' });
+  await confirmRestart.waitFor({ state: 'visible', timeout: 10000 });
+  await saveScreenshot(page, 'restart-confirmation');
+  await confirmRestart.click();
+  console.log('Restart confirmed. Waiting for the notebook session...');
   await page.waitForTimeout(15000);
+  await saveScreenshot(page, 'restart-complete');
+
+  const bodyText = await page.locator('body').innerText().catch(() => '');
+  const sessionError = /session.{0,80}(error|failed|expired|invalid|unavailable|closed|ended|not found|disconnected|could not|unable)|(?:error|failed|expired|invalid|not found|disconnected|could not|unable).{0,80}session/i;
+
+  if (sessionError.test(bodyText)) {
+    console.log('Session error detected after restart. Reloading the notebook once...');
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForTimeout(15000);
+    await saveScreenshot(page, 'session-refreshed');
+  }
+
   return true;
 }
 
