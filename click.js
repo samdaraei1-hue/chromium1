@@ -127,7 +127,8 @@ async function prepareVisualReview(page) {
 
 async function restartIfReconnected(page) {
   const reconnected = page.getByText(/you have reconnected to an existing session/i).first();
-  if (!(await reconnected.isVisible().catch(() => false))) {
+  const bannerVisible = await reconnected.isVisible().catch(() => false);
+  if (!bannerVisible) {
     console.log('No reconnected-session banner; skipping restart.');
     return false;
   }
@@ -156,6 +157,32 @@ async function restartIfReconnected(page) {
     await saveScreenshot(page, 'session-refreshed');
   }
 
+  return true;
+}
+
+async function takeOverIfReader(page) {
+  const takeoverByTestId = page.getByTestId('takeover-button');
+  const takeoverByRole = page.getByRole('button', { name: /take over/i }).first();
+  const takeover = await takeoverByTestId.isVisible().catch(() => false)
+    ? takeoverByTestId
+    : takeoverByRole;
+
+  if (!(await takeover.isVisible().catch(() => false))) {
+    console.log('Reader-mode Take over button is not visible.');
+    return false;
+  }
+
+  console.log('Reader mode detected. Clicking Take over...');
+  await takeover.click();
+  const reconnectBanner = page.getByText(/you have reconnected to an existing session/i).first();
+  const bannerAppeared = await reconnectBanner
+    .waitFor({ state: 'visible', timeout: 10000 })
+    .then(() => true)
+    .catch(() => false);
+  console.log(bannerAppeared
+    ? 'Reconnection banner appeared after Take over.'
+    : 'No reconnection banner appeared after Take over.');
+  await saveScreenshot(page, 'after-takeover');
   return true;
 }
 
@@ -212,22 +239,7 @@ async function main() {
     await page.waitForTimeout(5000);
     await saveScreenshot(page, 'notebook-opened');
 
-    // Step 1: Take over if available
-    const takeOver = page.getByRole('button', {
-      name: /take over/i
-    });
-
-    if (await takeOver.count() > 0 &&
-        await takeOver.first().isVisible()) {
-
-      console.log('Reader mode detected. Taking over...');
-
-      await takeOver.first().click();
-
-      await page.waitForTimeout(5000);
-    } else {
-      console.log('Take over not required.');
-    }
+    await takeOverIfReader(page);
 
     if (process.argv.includes('--visual-review')) {
       await prepareVisualReview(page);
