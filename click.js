@@ -11,6 +11,16 @@ const DURATION = 345 * 60 * 1000;
 const sleep = ms =>
   new Promise(resolve => setTimeout(resolve, ms));
 
+function safeUrlForLog(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    const safePath = url.pathname.replace(/\/session\/[^/]+/i, '/session/[redacted]');
+    return `${url.origin}${safePath}`;
+  } catch {
+    return '[unparseable URL]';
+  }
+}
+
 async function findVisibleAcrossFrames(page, locatorFactory, timeout = 0) {
   const deadline = Date.now() + timeout;
 
@@ -23,7 +33,7 @@ async function findVisibleAcrossFrames(page, locatorFactory, timeout = 0) {
         const locator = candidates.nth(index);
         if (await locator.isVisible().catch(() => false)) {
           if (frame !== page.mainFrame()) {
-            console.log(`Found target in iframe: ${frame.url()}`);
+            console.log(`Found target in iframe: ${safeUrlForLog(frame.url())}`);
           }
           return { locator, frame };
         }
@@ -103,7 +113,7 @@ async function findNotebookEditor(page, timeout = 30000) {
           const editor = candidates.nth(index);
           if (await editor.isVisible().catch(() => false)) {
             if (frame !== page.mainFrame()) {
-              console.log(`Found notebook editor in iframe: ${frame.url()}`);
+              console.log(`Found notebook editor in iframe: ${safeUrlForLog(frame.url())}`);
             }
             return editor;
           }
@@ -115,7 +125,7 @@ async function findNotebookEditor(page, timeout = 30000) {
 
   const frameDetails = await Promise.all(page.frames().map(async frame => {
     const bodyText = await frame.locator('body').innerText().catch(() => '');
-    return `${frame.url()}: ${bodyText.replace(/\s+/g, ' ').trim().slice(0, 700)}`;
+    return `${safeUrlForLog(frame.url())}: ${bodyText.replace(/\s+/g, ' ').trim().slice(0, 700)}`;
   }));
   const buttons = await Promise.all(page.frames().map(frame =>
     frame.getByRole('button').allTextContents().catch(() => [])
@@ -129,20 +139,32 @@ async function findNotebookEditor(page, timeout = 30000) {
 }
 
 async function startReadOnlyPreview(page) {
-  const previewNotice = page.getByText(/read-only preview/i).first();
-  if (!(await previewNotice.isVisible().catch(() => false))) return false;
+  const previewNotice = await findVisibleAcrossFrames(
+    page,
+    frame => frame.getByText(/read-only preview/i),
+    0
+  );
+  if (!previewNotice) return false;
 
   console.log('Read-only preview detected. Starting notebook on Molab server...');
 
-  const runNow = page.getByRole('button', { name: /^run it now$/i });
-  await runNow.waitFor({ state: 'visible', timeout: 15000 });
-  await runNow.click();
+  const runNow = await findVisibleAcrossFrames(
+    page,
+    frame => frame.getByRole('button', { name: /^run it now$/i }),
+    15000
+  );
+  if (!runNow) throw new Error('Read-only preview appeared, but Run it now was not found.');
+  await runNow.locator.click();
   await saveScreenshot(page, 'server-confirmation');
 
-  const runOnServer = page.getByRole('button', { name: /^run on server$/i });
-  await runOnServer.waitFor({ state: 'visible', timeout: 30000 });
+  const runOnServer = await findVisibleAcrossFrames(
+    page,
+    frame => frame.getByRole('button', { name: /^run on server$/i }),
+    30000
+  );
+  if (!runOnServer) throw new Error('Run on server confirmation did not appear.');
   console.log('Server confirmation dialog is open. Confirming run on server.');
-  await runOnServer.click();
+  await runOnServer.locator.click();
 
   await page.waitForTimeout(5000);
   await saveScreenshot(page, 'server-started');
@@ -151,17 +173,29 @@ async function startReadOnlyPreview(page) {
 }
 
 async function prepareVisualReview(page) {
-  const previewNotice = page.getByText(/read-only preview/i).first();
-  if (!(await previewNotice.isVisible().catch(() => false))) {
+  const previewNotice = await findVisibleAcrossFrames(
+    page,
+    frame => frame.getByText(/read-only preview/i),
+    0
+  );
+  if (!previewNotice) {
     console.log('Read-only preview message was not visible for review.');
     return;
   }
 
-  const runNow = page.getByRole('button', { name: /^run it now$/i });
-  await runNow.waitFor({ state: 'visible', timeout: 15000 });
-  await runNow.click();
-  await page.getByRole('button', { name: /^run on server$/i })
-    .waitFor({ state: 'visible', timeout: 30000 });
+  const runNow = await findVisibleAcrossFrames(
+    page,
+    frame => frame.getByRole('button', { name: /^run it now$/i }),
+    15000
+  );
+  if (!runNow) throw new Error('Read-only preview appeared, but Run it now was not found.');
+  await runNow.locator.click();
+  const runOnServer = await findVisibleAcrossFrames(
+    page,
+    frame => frame.getByRole('button', { name: /^run on server$/i }),
+    30000
+  );
+  if (!runOnServer) throw new Error('Run on server confirmation did not appear.');
   await saveScreenshot(page, 'server-confirmation');
   console.log('Visual review complete; server execution was not started in this review pass.');
 }
@@ -198,7 +232,9 @@ async function restartIfReconnected(page) {
   await page.waitForTimeout(15000);
   await saveScreenshot(page, 'restart-complete');
 
-  const bodyText = await page.locator('body').innerText().catch(() => '');
+  const bodyText = (await Promise.all(page.frames().map(frame =>
+    frame.locator('body').innerText().catch(() => '')
+  ))).join(' ');
   const sessionError = /session.{0,80}(error|failed|expired|invalid|unavailable|closed|ended|not found|disconnected|could not|unable)|(?:error|failed|expired|invalid|not found|disconnected|could not|unable).{0,80}session/i;
 
   if (sessionError.test(bodyText)) {
@@ -229,12 +265,12 @@ async function takeOverIfReader(page) {
 
   console.log('Reader mode detected. Clicking Take over...');
   await takeoverTarget.locator.click();
-  const reconnectBanner = page.getByText(/you have reconnected to an existing session/i).first();
-  const bannerAppeared = await reconnectBanner
-    .waitFor({ state: 'visible', timeout: 10000 })
-    .then(() => true)
-    .catch(() => false);
-  console.log(bannerAppeared
+  const reconnectBanner = await findVisibleAcrossFrames(
+    page,
+    frame => frame.getByText(/you have reconnected to an existing session/i),
+    10000
+  );
+  console.log(reconnectBanner
     ? 'Reconnection banner appeared after Take over.'
     : 'No reconnection banner appeared after Take over.');
   await saveScreenshot(page, 'after-takeover');
@@ -270,16 +306,14 @@ async function main() {
     }
   });
   page.on('requestfailed', request => {
-    const url = new URL(request.url());
     console.error(
-      `[request failed] ${url.origin}${url.pathname} | ` +
+      `[request failed] ${safeUrlForLog(request.url())} | ` +
       `${request.failure()?.errorText || 'unknown error'}`
     );
   });
   page.on('response', response => {
     if (response.status() >= 400) {
-      const url = new URL(response.url());
-      console.error(`[HTTP ${response.status()}] ${url.origin}${url.pathname}`);
+      console.error(`[HTTP ${response.status()}] ${safeUrlForLog(response.url())}`);
     }
   });
 
@@ -357,22 +391,26 @@ async function main() {
 }
 
 async function recoverNotebook(page) {
-    const stopped = page.getByText(/notebook stopped/i).first();
+    const stopped = await findVisibleAcrossFrames(
+      page,
+      frame => frame.getByText(/notebook stopped/i),
+      0
+    );
 
-    if (!(await stopped.isVisible().catch(() => false))) {
+    if (!stopped) {
         console.log('Notebook is not stopped.');
         return false;
     }
 
     console.log('Stopped sandbox detected.');
 
-    const relaunch = page.getByRole('button', {
-        name: /^relaunch$/i
-    });
-
-    await relaunch.waitFor({ state: 'visible', timeout: 15000 });
-
-    await relaunch.click();
+    const relaunch = await findVisibleAcrossFrames(
+      page,
+      frame => frame.getByRole('button', { name: /^relaunch$/i }),
+      15000
+    );
+    if (!relaunch) throw new Error('Stopped notebook detected, but Relaunch button was not found.');
+    await relaunch.locator.click();
 
     console.log('Relaunch clicked.');
 
