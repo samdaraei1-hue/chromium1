@@ -487,9 +487,9 @@ async function main() {
         continue;
       }
 
-      // Reusing an existing Molab session should not restart it automatically.
-      // The restart banner can appear for a healthy session, and restarting it
-      // here can leave the editor unavailable while the notebook reconnects.
+      // A reconnected session keeps the run control disabled until this session
+      // restart is completed. Execution below targets the Run button directly.
+      await restartIfReconnected(page);
       await recoverNotebook(page);
       const previewStarted = await startReadOnlyPreview(page);
 
