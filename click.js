@@ -239,75 +239,6 @@ async function findNotebookEditor(page, timeout = 60000) {
   );
 }
 
-async function findRunAllButton(page, timeout = 15000) {
-  const runAllNames = /run all(?: cells)?|run stale cells|run notebook/i;
-  const deadline = Date.now() + timeout;
-
-  do {
-    for (const frame of page.frames()) {
-      const testIdButtons = frame.getByTestId('run-button');
-      const testIdCount = await testIdButtons.count().catch(() => 0);
-      for (let index = testIdCount - 1; index >= 0; index--) {
-        const button = testIdButtons.nth(index);
-        const available = await button.evaluate(element =>
-          !element.classList.contains('disabled') &&
-          !element.classList.contains('inactive-button')
-        ).catch(() => false);
-        if (available &&
-            await button.isVisible().catch(() => false) &&
-            await button.isEnabled().catch(() => false)) {
-          return { locator: button, frame };
-        }
-      }
-
-      const byRole = frame.getByRole('button', { name: runAllNames });
-      const count = await byRole.count().catch(() => 0);
-      for (let index = 0; index < count; index++) {
-        const button = byRole.nth(index);
-        if (await button.isVisible().catch(() => false) &&
-            await button.isEnabled().catch(() => false)) {
-          return { locator: button, frame };
-        }
-      }
-
-      const byTitle = frame.locator('button[title], button[aria-label]');
-      const titledCount = await byTitle.count().catch(() => 0);
-      for (let index = 0; index < titledCount; index++) {
-        const button = byTitle.nth(index);
-        const label = [
-          await button.getAttribute('title').catch(() => ''),
-          await button.getAttribute('aria-label').catch(() => '')
-        ].join(' ');
-        if (runAllNames.test(label) &&
-            await button.isVisible().catch(() => false) &&
-            await button.isEnabled().catch(() => false)) {
-          return { locator: button, frame };
-        }
-      }
-    }
-
-    if (Date.now() >= deadline) break;
-    await page.waitForTimeout(500);
-  } while (Date.now() < deadline);
-
-  const controls = await Promise.all(page.frames().map(async frame => {
-    const buttons = frame.locator('button');
-    const count = await buttons.count().catch(() => 0);
-    const labels = [];
-    for (let index = 0; index < Math.min(count, 100); index++) {
-      const button = buttons.nth(index);
-      const label = [
-        (await button.innerText().catch(() => '')).trim(),
-        await button.getAttribute('title').catch(() => ''),
-        await button.getAttribute('aria-label').catch(() => '')
-      ].filter(Boolean).join(' / ');
-      if (label) labels.push(label);
-    }
-    return `${safeUrlForLog(frame.url())}: ${labels.join(' | ') || '(no labeled buttons)'}`;
-  }));
-  throw new Error(`Run all button was not found or enabled. Buttons: ${controls.join(' || ')}`);
-}
-
 async function startReadOnlyPreview(page) {
   const previewNotice = await findVisibleAcrossFrames(
     page,
@@ -493,15 +424,17 @@ async function main() {
       await recoverNotebook(page);
       const previewStarted = await startReadOnlyPreview(page);
 
-      await openLogsPanel(page, notebookNumber, state);
-
       if (!previewStarted) {
         console.log(`Preparing notebook ${notebookNumber} execution...`);
-        const runAll = await findRunAllButton(page, 15000);
-        await runAll.locator.click();
-        console.log(`Notebook ${notebookNumber}: Run all button clicked.`);
+        const editor = await findNotebookEditor(page, 60000);
+        await editor.click();
+        await page.keyboard.press('Control+Shift+R');
+        console.log(`Notebook ${notebookNumber}: Ctrl+Shift+R sent while Logs is closed.`);
       }
 
+      // Opening the developer panel can make notebook controls inert. Start
+      // execution first, then open Logs for monitoring.
+      await openLogsPanel(page, notebookNumber, state);
       await reportNewLogs(page, notebookNumber, state);
     }
 
