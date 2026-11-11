@@ -3,6 +3,10 @@
   "name": "molab-automation",
   "version": "1.0.0",
   "private": true,
+  "scripts": {
+    "start": "node manager.js",
+    "run": "node click.js"
+  },
   "dependencies": {
     "playwright": "^1.56.0"
   }

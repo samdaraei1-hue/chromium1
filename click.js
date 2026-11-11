@@ -7,7 +7,7 @@ const NOTEBOOK_URLS = [
   'https://molab.marimo.io/notebooks/nb_qmw8E5jTejuvsnpC8anUqq'
 ];
 
-const INTERVAL = 5 * 60 * 1000;
+const INTERVAL = 3 * 1000;
 const DURATION = 345 * 60 * 1000;
 
 const sleep = ms =>
@@ -119,17 +119,22 @@ async function clickSafeRandom(page) {
   return true;
 }
 
-async function openLogsPanel(page, notebookNumber) {
+async function openLogsPanel(page, notebookNumber, state) {
   // marimo's developer panel is toggled with Ctrl/Cmd+J. The Logs tab exposes
   // stdout/stderr from notebook cells.
   await page.keyboard.press('Control+j').catch(() => {});
   await page.waitForTimeout(500);
   const logsTab = await findVisibleAcrossFrames(page, frame =>
-    frame.getByRole('tab', { name: /^logs$/i })
-      .or(frame.getByRole('button', { name: /^logs$/i }))
-      .or(frame.getByText(/^logs$/i)), 3000);
+    frame.getByRole('tab', { name: /^logs$/i }), 1000)
+    || await findVisibleAcrossFrames(page, frame =>
+      frame.getByRole('button', { name: /^logs$/i }), 1000)
+    || await findVisibleAcrossFrames(page, frame => frame.getByText(/^logs$/i), 1000);
   if (logsTab) {
+    const panelId = await logsTab.locator.getAttribute('aria-controls').catch(() => null);
     await logsTab.locator.click().catch(() => {});
+    state.logPanel = panelId
+      ? { frame: logsTab.frame, selector: `[id="${panelId.replaceAll('"', '\\"')}"]` }
+      : { frame: logsTab.frame, selector: '[role="tabpanel"]' };
     console.log(`Opened the Logs panel for notebook ${notebookNumber}.`);
     return true;
   }
@@ -137,9 +142,15 @@ async function openLogsPanel(page, notebookNumber) {
   return false;
 }
 
-async function readNotebookLogs(page) {
+async function readNotebookLogs(page, state) {
+  if (state.logPanel) {
+    const panel = state.logPanel.frame.locator(`${state.logPanel.selector}:visible`);
+    const text = (await panel.innerText().catch(() => '')).trim();
+    if (text) return text;
+  }
+
   for (const frame of page.frames()) {
-    const panels = frame.locator('[role="tabpanel"]:visible');
+    const panels = frame.locator('[role="tabpanel"]:visible, [data-panel="logs"]:visible');
     const count = await panels.count().catch(() => 0);
     for (let i = count - 1; i >= 0; i--) {
       const text = (await panels.nth(i).innerText().catch(() => '')).trim();
@@ -150,7 +161,7 @@ async function readNotebookLogs(page) {
 }
 
 async function reportNewLogs(page, notebookNumber, state) {
-  const snapshot = await readNotebookLogs(page);
+  const snapshot = await readNotebookLogs(page, state);
   if (!snapshot || snapshot === state.lastSnapshot) return;
   const newText = snapshot.startsWith(state.lastSnapshot)
     ? snapshot.slice(state.lastSnapshot.length).trim()
@@ -369,7 +380,7 @@ async function saveScreenshot(page, name) {
 
 async function main() {
   fs.mkdirSync('artifacts', { recursive: true });
-  fs.writeFileSync('artifacts/notebook-logs.txt', '', 'utf8');
+  fs.appendFileSync('artifacts/notebook-logs.txt', `\n[${new Date().toISOString()}] Automation process started.\n`, 'utf8');
 
   const browser = await chromium.launch({
     headless: false
@@ -405,6 +416,8 @@ async function main() {
       await recoverNotebook(page);
       const previewStarted = await startReadOnlyPreview(page);
 
+      await openLogsPanel(page, notebookNumber, state);
+
       if (!previewStarted) {
         console.log(`Preparing notebook ${notebookNumber} execution...`);
         const editor = await findNotebookEditor(page, 20000);
@@ -413,7 +426,6 @@ async function main() {
         console.log(`Notebook ${notebookNumber}: Run all shortcut sent.`);
       }
 
-      await openLogsPanel(page, notebookNumber);
       await reportNewLogs(page, notebookNumber, state);
     }
 
@@ -424,7 +436,7 @@ async function main() {
     const endTime = Date.now() + DURATION;
     const lastClickAt = new Map(notebooks.map(item => [item.notebookNumber, Date.now()]));
     while (Date.now() < endTime) {
-      await sleep(10000);
+      await sleep(1000);
       for (const { page, state, notebookNumber } of notebooks) {
         if (page.isClosed()) throw new Error(`Notebook ${notebookNumber} page was closed.`);
         await reportNewLogs(page, notebookNumber, state);
