@@ -189,7 +189,7 @@ function attachBrowserDiagnostics(page, notebookNumber) {
   });
 }
 
-async function findNotebookEditor(page, timeout = 30000) {
+async function findNotebookEditor(page, timeout = 60000) {
   const selectors = [
     '.cm-editor .cm-content',
     '.cm-content[contenteditable="true"]',
@@ -206,7 +206,13 @@ async function findNotebookEditor(page, timeout = 30000) {
         const count = await candidates.count().catch(() => 0);
         for (let index = 0; index < count; index++) {
           const editor = candidates.nth(index);
-          if (await editor.isVisible().catch(() => false)) {
+          const visible = await editor.isVisible().catch(() => false);
+          const editable = visible && await editor.isEditable().catch(() => false);
+          const active = editable && await editor.evaluate(element =>
+            !element.closest('[inert]') &&
+            getComputedStyle(element).pointerEvents !== 'none'
+          ).catch(() => false);
+          if (active) {
             if (frame !== page.mainFrame()) {
               console.log(`Found notebook editor in iframe: ${safeUrlForLog(frame.url())}`);
             }
@@ -226,7 +232,7 @@ async function findNotebookEditor(page, timeout = 30000) {
     frame.getByRole('button').allTextContents().catch(() => [])
   ));
   throw new Error(
-    `Notebook editor did not appear. URL: ${page.url()} | ` +
+    `Notebook editor did not become active and editable within ${timeout} ms. URL: ${page.url()} | ` +
     `Title: ${await page.title().catch(() => 'unavailable')} | ` +
     `Buttons: ${buttons.flat().map(text => text.trim()).filter(Boolean).join(' | ') || '(none)'} | ` +
     `Frames: ${frameDetails.join(' || ') || '(none)'}`
@@ -420,7 +426,7 @@ async function main() {
 
       if (!previewStarted) {
         console.log(`Preparing notebook ${notebookNumber} execution...`);
-        const editor = await findNotebookEditor(page, 20000);
+        const editor = await findNotebookEditor(page, 60000);
         await editor.click();
         await page.keyboard.press('Control+Shift+R');
         console.log(`Notebook ${notebookNumber}: Run all shortcut sent.`);
