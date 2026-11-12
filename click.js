@@ -207,10 +207,15 @@ function attachBrowserDiagnostics(page, notebookNumber, state) {
 async function findNotebookEditor(page, timeout = 60000) {
   const selectors = [
     '.cm-editor .cm-content',
+    '.cm-content',
     '.cm-content[contenteditable="true"]',
     '.monaco-editor [contenteditable="true"]',
     '.CodeMirror textarea',
-    '[data-testid="notebook-cell"] [contenteditable="true"]'
+    '[data-testid="notebook-cell"] [contenteditable="true"]',
+    '[data-testid*="editor"] [contenteditable="true"]',
+    '[contenteditable="true"]',
+    'textarea:not([disabled]):not([readonly])',
+    '[role="textbox"]'
   ];
   const deadline = Date.now() + timeout;
 
@@ -246,11 +251,25 @@ async function findNotebookEditor(page, timeout = 60000) {
   const buttons = await Promise.all(page.frames().map(frame =>
     frame.getByRole('button').allTextContents().catch(() => [])
   ));
+  const editableDetails = await Promise.all(page.frames().map(async frame => {
+    const details = await frame.locator('textarea, [contenteditable], [role="textbox"]').evaluateAll(elements =>
+      elements.slice(0, 20).map(element => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return `${element.tagName.toLowerCase()}.${String(element.className || '').replace(/\s+/g, '.')}` +
+          ` role=${element.getAttribute('role') || '-'} contenteditable=${element.getAttribute('contenteditable') || '-'}` +
+          ` aria=${element.getAttribute('aria-label') || '-'} visible=${rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden'}` +
+          ` disabled=${Boolean(element.disabled)} readonly=${Boolean(element.readOnly)}`;
+      }).join(' || ')
+    ).catch(() => 'unavailable');
+    return `${safeUrlForLog(frame.url())}: ${details || '(none)'}`;
+  }));
   throw new Error(
     `Notebook editor did not become active and editable within ${timeout} ms. URL: ${page.url()} | ` +
     `Title: ${await page.title().catch(() => 'unavailable')} | ` +
     `Buttons: ${buttons.flat().map(text => text.trim()).filter(Boolean).join(' | ') || '(none)'} | ` +
-    `Frames: ${frameDetails.join(' || ') || '(none)'}`
+    `Frames: ${frameDetails.join(' || ') || '(none)'} | ` +
+    `Editable candidates: ${editableDetails.join(' || ') || '(none)'}`
   );
 }
 
@@ -313,15 +332,31 @@ async function prepareVisualReview(page) {
   console.log('Visual review complete; server execution was not started in this review pass.');
 }
 
-async function restartIfReconnected(page) {
+async function restartIfReconnected(page, { required = false } = {}) {
+  const timeout = required ? 3000 : 10000;
   const restartTarget = await findVisibleAcrossFrames(
     page,
     frame => frame.getByTestId('restart-session-button'),
-    10000
+    timeout
+  ) || await findVisibleAcrossFrames(
+    page,
+    frame => frame.getByRole('link', { name: /^restart$/i }),
+    1000
+  ) || await findVisibleAcrossFrames(
+    page,
+    frame => frame.getByRole('button', { name: /^restart$/i }),
+    1000
+  ) || await findVisibleAcrossFrames(
+    page,
+    frame => frame.getByText(/^restart$/i),
+    1000
   );
 
   if (!restartTarget) {
-    console.log('Blue Restart link was not found in the page or any iframe. Skipping restart.');
+    if (required) {
+      throw new Error('The required blue Restart action was not found after opening the notebook.');
+    }
+    console.log('Blue Restart action was not found after refresh; continuing recovery.');
     return false;
   }
 
@@ -331,7 +366,7 @@ async function restartIfReconnected(page) {
 
   const confirmTarget = await findVisibleAcrossFrames(
     page,
-    frame => frame.getByRole('button', { name: 'Confirm Restart' }),
+    frame => frame.getByRole('button', { name: /^confirm restart$/i }),
     10000
   );
   if (!confirmTarget) {
@@ -457,7 +492,7 @@ async function main() {
 
         // A reconnected session keeps the run control disabled until this session
         // restart is completed. Execution below targets the Run button directly.
-        await restartIfReconnected(page);
+        await restartIfReconnected(page, { required: true });
         await recoverNotebook(page);
 
         // Snapshot existing output before starting so old errors are not mistaken
@@ -484,6 +519,9 @@ async function main() {
         const reason = error?.message || String(error);
         appendLog(notebookNumber, `[automation action failed] ${reason}`);
         if (recoveryUsed) throw new Error(`Setup failed again after one recovery: ${reason}`);
+        if (/required blue Restart action was not found|Confirm Restart did not appear/i.test(reason)) {
+          throw new Error(`Setup could not complete the required session restart: ${reason}`);
+        }
         console.error(`Setup failed for notebook ${notebookNumber}: ${reason}`);
         recoveryUsed = true;
         await recoverAllNotebooks(notebooks);
