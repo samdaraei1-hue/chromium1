@@ -204,44 +204,38 @@ function attachBrowserDiagnostics(page, notebookNumber, state) {
   });
 }
 
-async function findNotebookEditor(page, timeout = 60000) {
-  const selectors = [
-    '.cm-editor .cm-content',
-    '.cm-content',
-    '.cm-content[contenteditable="true"]',
-    '.monaco-editor [contenteditable="true"]',
-    '.CodeMirror textarea',
-    '[data-testid="notebook-cell"] [contenteditable="true"]',
-    '[data-testid*="editor"] [contenteditable="true"]',
-    '[contenteditable="true"]',
-    'textarea:not([disabled]):not([readonly])',
-    '[role="textbox"]'
-  ];
+async function findNotebookEditor(page, timeout = 60000, allowTakeover = true) {
+  // Verified from Molab's rendered editor HTML: CodeMirror uses this exact node.
+  const selector = '.cm-editor .cm-content';
   const deadline = Date.now() + timeout;
 
   while (Date.now() < deadline) {
     for (const frame of page.frames()) {
-      for (const selector of selectors) {
-        const candidates = frame.locator(selector);
-        const count = await candidates.count().catch(() => 0);
-        for (let index = 0; index < count; index++) {
-          const editor = candidates.nth(index);
-          const visible = await editor.isVisible().catch(() => false);
-          const editable = visible && await editor.isEditable().catch(() => false);
-          const active = editable && await editor.evaluate(element =>
-            !element.closest('[inert]') &&
-            getComputedStyle(element).pointerEvents !== 'none'
-          ).catch(() => false);
-          if (active) {
-            if (frame !== page.mainFrame()) {
-              console.log(`Found notebook editor in iframe: ${safeUrlForLog(frame.url())}`);
-            }
-            return editor;
+      const candidates = frame.locator(selector);
+      const count = await candidates.count().catch(() => 0);
+      for (let index = 0; index < count; index++) {
+        const editor = candidates.nth(index);
+        const visible = await editor.isVisible().catch(() => false);
+        const editable = visible && await editor.isEditable().catch(() => false);
+        const active = editable && await editor.evaluate(element =>
+          !element.closest('[inert]') &&
+          getComputedStyle(element).pointerEvents !== 'none'
+        ).catch(() => false);
+        if (active) {
+          if (frame !== page.mainFrame()) {
+            console.log(`Found notebook editor in iframe: ${safeUrlForLog(frame.url())}`);
           }
+          return editor;
         }
       }
     }
     await page.waitForTimeout(1000);
+  }
+
+  if (allowTakeover && await takeOverIfReader(page)) {
+    console.log('Read-only Take over control appeared; taking over and restarting the session before retrying the editor.');
+    await restartIfReconnected(page, { required: true });
+    return findNotebookEditor(page, 30000, false);
   }
 
   const frameDetails = await Promise.all(page.frames().map(async frame => {
@@ -333,23 +327,10 @@ async function prepareVisualReview(page) {
 }
 
 async function restartIfReconnected(page, { required = false } = {}) {
-  const timeout = required ? 3000 : 10000;
   const restartTarget = await findVisibleAcrossFrames(
     page,
     frame => frame.getByTestId('restart-session-button'),
-    timeout
-  ) || await findVisibleAcrossFrames(
-    page,
-    frame => frame.getByRole('link', { name: /^restart$/i }),
-    1000
-  ) || await findVisibleAcrossFrames(
-    page,
-    frame => frame.getByRole('button', { name: /^restart$/i }),
-    1000
-  ) || await findVisibleAcrossFrames(
-    page,
-    frame => frame.getByText(/^restart$/i),
-    1000
+    10000
   );
 
   if (!restartTarget) {
@@ -370,9 +351,9 @@ async function restartIfReconnected(page, { required = false } = {}) {
     10000
   );
   if (!confirmTarget) {
-    throw new Error('Clicked blue Restart, but Confirm Restart did not appear in the page or any iframe.');
+    throw new Error('Clicked blue Restart, but the red Confirm Restart button did not appear in the page or any iframe.');
   }
-  console.log('Confirm Restart button found. Clicking it...');
+  console.log('Red Restart confirmation button found. Clicking it...');
   await confirmTarget.locator.click();
   console.log('Restart confirmed. Waiting for the notebook session...');
   await page.waitForTimeout(15000);
@@ -403,17 +384,11 @@ async function recoverAllNotebooks(notebooks) {
     console.log(`Refreshing notebook ${notebookNumber} with F5.`);
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForTimeout(5000);
-    await takeOverIfReader(page);
-
-    const restarted = await restartIfReconnected(page);
+    const tookOver = await takeOverIfReader(page);
+    const restarted = await restartIfReconnected(page, { required: tookOver });
     if (!restarted) {
       console.log(`Notebook ${notebookNumber}: blue Restart button did not appear; trying Run after refresh.`);
     }
-
-    await openLogsPanel(page, notebookNumber, state);
-    state.lastSnapshot = await readNotebookLogs(page, state);
-    await page.keyboard.press('Control+j').catch(() => {});
-    await page.waitForTimeout(500);
 
     const editor = await findNotebookEditor(page, 60000);
     await editor.click();
@@ -494,14 +469,6 @@ async function main() {
         // restart is completed. Execution below targets the Run button directly.
         await restartIfReconnected(page, { required: true });
         await recoverNotebook(page);
-
-        // Snapshot existing output before starting so old errors are not mistaken
-        // for errors from this run. Close Logs while interacting with the editor.
-        await openLogsPanel(page, notebookNumber, state);
-        state.lastSnapshot = await readNotebookLogs(page, state);
-        await page.keyboard.press('Control+j').catch(() => {});
-        await page.waitForTimeout(500);
-
         const previewStarted = await startReadOnlyPreview(page);
 
         if (!previewStarted) {
@@ -519,7 +486,7 @@ async function main() {
         const reason = error?.message || String(error);
         appendLog(notebookNumber, `[automation action failed] ${reason}`);
         if (recoveryUsed) throw new Error(`Setup failed again after one recovery: ${reason}`);
-        if (/required blue Restart action was not found|Confirm Restart did not appear/i.test(reason)) {
+        if (/required blue Restart action was not found|red Confirm Restart button did not appear/i.test(reason)) {
           throw new Error(`Setup could not complete the required session restart: ${reason}`);
         }
         console.error(`Setup failed for notebook ${notebookNumber}: ${reason}`);
