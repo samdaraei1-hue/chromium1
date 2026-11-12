@@ -33,7 +33,12 @@ jobs:
           test -s auth.json
 
       - name: Capture browser preview
-        run: xvfb-run -a node click.js --visual-review
+        shell: bash
+        run: |
+          if ! xvfb-run -a node click.js --visual-review > "${RUNNER_TEMP}/molab-preview.log" 2>&1; then
+            echo "Visual preview could not be captured; the monitored run will still start."
+            grep -Ei 'error|failed|exception|timeout|HTTP [45][0-9][0-9]|request failed' "${RUNNER_TEMP}/molab-preview.log" | tail -n 40 || true
+          fi
 
       - name: Upload browser preview
         if: always()
@@ -44,8 +49,36 @@ jobs:
           if-no-files-found: ignore
           retention-days: 1
 
-      - name: Run Molab automation
-        run: xvfb-run -a node click.js
+      - name: Run Molab automation with recovery
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          attempt=1
+          max_attempts=3
+          while [ "$attempt" -le "$max_attempts" ]; do
+            echo "Starting automation attempt ${attempt}/${max_attempts}."
+            run_log="${RUNNER_TEMP}/molab-attempt-${attempt}.log"
+            if xvfb-run -a node click.js > "$run_log" 2>&1; then
+              status=0
+            else
+              status=$?
+            fi
+            if [ "$status" -eq 0 ] && ! grep -Eiq 'Automation error:|\[browser page error\]|\[browser console error\]|\[HTTP 5[0-9][0-9]\]|\[request failed\]' "$run_log"; then
+              echo "Automation completed successfully."
+              grep -Ei 'error|failed|exception|timeout|HTTP [45][0-9][0-9]|request failed' "$run_log" | tail -n 80 >> artifacts/automation-diagnostics.log || true
+              exit 0
+            fi
+            if [ "$status" -eq 0 ]; then status=1; fi
+            echo "Automation attempt ${attempt} failed (exit ${status}). Relevant diagnostics:"
+            grep -Ei 'error|failed|exception|timeout|HTTP [45][0-9][0-9]|request failed' "$run_log" | tail -n 80 | tee -a artifacts/automation-diagnostics.log || true
+            if [ "$attempt" -eq "$max_attempts" ]; then
+              echo "Automation failed after ${max_attempts} attempts."
+              exit "$status"
+            fi
+            echo "Restarting automatically in 15 seconds."
+            sleep 15
+            attempt=$((attempt + 1))
+          done
 
       - name: Upload browser screenshots
         if: always()

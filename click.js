@@ -7,7 +7,6 @@ const NOTEBOOK_URLS = [
   'https://molab.marimo.io/notebooks/nb_qmw8E5jTejuvsnpC8anUqq'
 ];
 
-const INTERVAL = 3 * 1000;
 const DURATION = 345 * 60 * 1000;
 
 const sleep = ms =>
@@ -169,23 +168,39 @@ async function reportNewLogs(page, notebookNumber, state) {
   state.lastSnapshot = snapshot;
   if (!newText) return;
 
-  for (const line of newText.split(/\r?\n/).map(line => line.trim()).filter(Boolean)) {
+  const relevant = newText.split(/\r?\n/).map(line => line.trim()).filter(line =>
+    /\b(error|failed|failure|exception|traceback|fatal|timed? ?out|timeout|warning)\b/i.test(line)
+  );
+  for (const line of relevant) {
     appendLog(notebookNumber, line);
+    if (/\b(error|failed|failure|exception|traceback|fatal)\b/i.test(line)) {
+      throw new Error(`Notebook ${notebookNumber} reported an execution error: ${line.slice(0, 500)}`);
+    }
   }
 }
 
-function attachBrowserDiagnostics(page, notebookNumber) {
+function attachBrowserDiagnostics(page, notebookNumber, state) {
   page.on('pageerror', error => {
+    state.fatalError = `Browser page error: ${error.message}`;
     appendLog(notebookNumber, `[browser page error] ${error.message}`);
   });
   page.on('console', message => {
-    if (message.type() === 'error') appendLog(notebookNumber, `[browser console error] ${message.text()}`);
+    if (message.type() === 'error') {
+      state.fatalError = `Browser console error: ${message.text()}`;
+      appendLog(notebookNumber, `[browser console error] ${message.text()}`);
+    }
   });
   page.on('requestfailed', request => {
-    appendLog(notebookNumber, `[request failed] ${safeUrlForLog(request.url())} | ${request.failure()?.errorText || 'unknown error'}`);
+    const message = `[request failed] ${safeUrlForLog(request.url())} | ${request.failure()?.errorText || 'unknown error'}`;
+    state.fatalError = message;
+    appendLog(notebookNumber, message);
   });
   page.on('response', response => {
-    if (response.status() >= 400) appendLog(notebookNumber, `[HTTP ${response.status()}] ${safeUrlForLog(response.url())}`);
+    if (response.status() >= 500) {
+      const message = `[HTTP ${response.status()}] ${safeUrlForLog(response.url())}`;
+      state.fatalError = message;
+      appendLog(notebookNumber, message);
+    }
   });
 }
 
@@ -403,8 +418,8 @@ async function main() {
     for (let index = 0; index < NOTEBOOK_URLS.length; index++) {
       const notebookNumber = index + 1;
       const page = await context.newPage();
-      const state = { lastSnapshot: '' };
-      attachBrowserDiagnostics(page, notebookNumber);
+      const state = { lastSnapshot: '', fatalError: null };
+      attachBrowserDiagnostics(page, notebookNumber, state);
       notebooks.push({ page, state, notebookNumber });
 
       console.log(`Opening Molab notebook ${notebookNumber}/${NOTEBOOK_URLS.length}: ${NOTEBOOK_URLS[index]}`);
@@ -440,19 +455,19 @@ async function main() {
 
     if (process.argv.includes('--visual-review')) return;
 
-    // Keep every notebook tab alive, poll its Logs panel, and perform the
-    // requested harmless right-click/Escape fallback when no safe blank spot exists.
+    // Keep notebook tabs alive and inspect only error-like lines from Logs.
     const endTime = Date.now() + DURATION;
-    const lastClickAt = new Map(notebooks.map(item => [item.notebookNumber, Date.now()]));
+    let lastHeartbeatAt = Date.now();
     while (Date.now() < endTime) {
-      await sleep(1000);
+      await sleep(5000);
       for (const { page, state, notebookNumber } of notebooks) {
         if (page.isClosed()) throw new Error(`Notebook ${notebookNumber} page was closed.`);
+        if (state.fatalError) throw new Error(`Notebook ${notebookNumber}: ${state.fatalError}`);
         await reportNewLogs(page, notebookNumber, state);
-        if (Date.now() - lastClickAt.get(notebookNumber) >= INTERVAL) {
-          await clickSafeRandom(page);
-          lastClickAt.set(notebookNumber, Date.now());
-        }
+      }
+      if (Date.now() - lastHeartbeatAt >= 5 * 60 * 1000) {
+        console.log(`Automation healthy; monitoring ${notebooks.length} notebook(s).`);
+        lastHeartbeatAt = Date.now();
       }
     }
 
