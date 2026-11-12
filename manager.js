@@ -12,6 +12,7 @@ let stopping = false;
 let restarting = false;
 let startedAt = null;
 let restartCount = 0;
+const maxRestarts = 1;
 
 function log(message) {
   const line = `[${new Date().toISOString()}] ${message}`;
@@ -36,9 +37,17 @@ function start() {
       pending += chunk;
       const lines = pending.split(/\r?\n/);
       pending = lines.pop();
-      for (const line of lines) if (line.trim()) log(`[${label}] ${line}`);
+      for (const line of lines) {
+        if (/\b(error|failed|failure|exception|traceback|fatal|timeout|warning)\b/i.test(line) &&
+            !/no visitor id available/i.test(line)) {
+          log(`[${label}] ${line}`);
+        }
+      }
     });
-    stream.on('end', () => { if (pending.trim()) log(`[${label}] ${pending}`); });
+    stream.on('end', () => {
+      if (/\b(error|failed|failure|exception|traceback|fatal|timeout|warning)\b/i.test(pending) &&
+          !/no visitor id available/i.test(pending)) log(`[${label}] ${pending}`);
+    });
   }
   current.on('error', error => log(`Could not start automation: ${error.message}`));
   current.on('close', (code, signal) => {
@@ -49,10 +58,12 @@ function start() {
     if (restarting) {
       restarting = false;
       start();
-    } else if (code !== 0) {
+    } else if (code !== 0 && restartCount < maxRestarts) {
       restartCount++;
-      log('Restarting automatically in 5 seconds after an error.');
-      setTimeout(start, 5000);
+      log('Restarting once in 15 seconds after an error.');
+      setTimeout(start, 15000);
+    } else if (code !== 0) {
+      log('Automation failed again after its one retry; stopping.');
     }
   });
 }

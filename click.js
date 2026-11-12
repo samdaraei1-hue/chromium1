@@ -137,8 +137,7 @@ async function openLogsPanel(page, notebookNumber, state) {
     console.log(`Opened the Logs panel for notebook ${notebookNumber}.`);
     return true;
   }
-  console.log(`Logs tab was not discoverable for notebook ${notebookNumber}; will inspect visible notebook outputs.`);
-  return false;
+  throw new Error(`Notebook ${notebookNumber}: could not open the Molab Logs panel, so execution errors cannot be monitored.`);
 }
 
 async function readNotebookLogs(page, state) {
@@ -161,31 +160,32 @@ async function readNotebookLogs(page, state) {
 
 async function reportNewLogs(page, notebookNumber, state) {
   const snapshot = await readNotebookLogs(page, state);
-  if (!snapshot || snapshot === state.lastSnapshot) return;
+  if (!snapshot || snapshot === state.lastSnapshot) return [];
   const newText = snapshot.startsWith(state.lastSnapshot)
     ? snapshot.slice(state.lastSnapshot.length).trim()
     : snapshot;
   state.lastSnapshot = snapshot;
-  if (!newText) return;
+  if (!newText) return [];
 
-  const relevant = newText.split(/\r?\n/).map(line => line.trim()).filter(line =>
-    /\b(error|failed|failure|exception|traceback|fatal|timed? ?out|timeout|warning)\b/i.test(line)
+  const errors = newText.split(/\r?\n/).map(line => line.trim()).filter(line =>
+    !/no visitor id available/i.test(line) &&
+    /\b(error|failed)\b/i.test(line)
   );
-  for (const line of relevant) {
+  for (const line of errors) {
     appendLog(notebookNumber, line);
-    if (/\b(error|failed|failure|exception|traceback|fatal)\b/i.test(line)) {
-      throw new Error(`Notebook ${notebookNumber} reported an execution error: ${line.slice(0, 500)}`);
-    }
   }
+  return errors;
 }
 
 function attachBrowserDiagnostics(page, notebookNumber, state) {
   page.on('pageerror', error => {
+    if (/no visitor id available/i.test(error.message)) return;
     state.fatalError = `Browser page error: ${error.message}`;
     appendLog(notebookNumber, `[browser page error] ${error.message}`);
   });
   page.on('console', message => {
     if (message.type() === 'error') {
+      if (/no visitor id available/i.test(message.text())) return;
       state.fatalError = `Browser console error: ${message.text()}`;
       appendLog(notebookNumber, `[browser console error] ${message.text()}`);
     }
@@ -271,7 +271,6 @@ async function startReadOnlyPreview(page) {
   );
   if (!runNow) throw new Error('Read-only preview appeared, but Run it now was not found.');
   await runNow.locator.click();
-  await saveScreenshot(page, 'server-confirmation');
 
   const runOnServer = await findVisibleAcrossFrames(
     page,
@@ -283,7 +282,6 @@ async function startReadOnlyPreview(page) {
   await runOnServer.locator.click();
 
   await page.waitForTimeout(5000);
-  await saveScreenshot(page, 'server-started');
   console.log('Notebook run on server was started.');
   return true;
 }
@@ -312,7 +310,6 @@ async function prepareVisualReview(page) {
     30000
   );
   if (!runOnServer) throw new Error('Run on server confirmation did not appear.');
-  await saveScreenshot(page, 'server-confirmation');
   console.log('Visual review complete; server execution was not started in this review pass.');
 }
 
@@ -328,8 +325,7 @@ async function restartIfReconnected(page) {
     return false;
   }
 
-  console.log('Blue Restart link found. Taking a screenshot before clicking...');
-  await saveScreenshot(page, 'restart-banner');
+  console.log('Blue Restart link found.');
   console.log('Clicking the blue Restart link...');
   await restartTarget.locator.click();
 
@@ -341,12 +337,10 @@ async function restartIfReconnected(page) {
   if (!confirmTarget) {
     throw new Error('Clicked blue Restart, but Confirm Restart did not appear in the page or any iframe.');
   }
-  await saveScreenshot(page, 'restart-confirmation');
   console.log('Confirm Restart button found. Clicking it...');
   await confirmTarget.locator.click();
   console.log('Restart confirmed. Waiting for the notebook session...');
   await page.waitForTimeout(15000);
-  await saveScreenshot(page, 'restart-complete');
 
   const bodyText = (await Promise.all(page.frames().map(frame =>
     frame.locator('body').innerText().catch(() => '')
@@ -357,10 +351,44 @@ async function restartIfReconnected(page) {
     console.log('Session error detected after restart. Reloading the notebook once...');
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForTimeout(15000);
-    await saveScreenshot(page, 'session-refreshed');
   }
 
   return true;
+}
+
+async function recoverAllNotebooks(notebooks) {
+  console.log('Interrupting notebook runs with Ctrl+I before recovery.');
+  for (const { page } of notebooks) {
+    if (!page.isClosed()) await page.keyboard.press('Control+i').catch(() => {});
+  }
+  await sleep(2000);
+
+  for (const { page, state, notebookNumber } of notebooks) {
+    if (page.isClosed()) throw new Error(`Notebook ${notebookNumber} page closed during recovery.`);
+    console.log(`Refreshing notebook ${notebookNumber} with F5.`);
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForTimeout(5000);
+    await takeOverIfReader(page);
+
+    const restarted = await restartIfReconnected(page);
+    if (!restarted) {
+      console.log(`Notebook ${notebookNumber}: blue Restart button did not appear; trying Run after refresh.`);
+    }
+
+    await openLogsPanel(page, notebookNumber, state);
+    state.lastSnapshot = await readNotebookLogs(page, state);
+    await page.keyboard.press('Control+j').catch(() => {});
+    await page.waitForTimeout(500);
+
+    const editor = await findNotebookEditor(page, 60000);
+    await editor.click();
+    await page.keyboard.press('Control+Shift+R');
+    state.fatalError = null;
+    console.log(`Notebook ${notebookNumber}: waiting 10 seconds for the rerun to initialize.`);
+    await page.waitForTimeout(10000);
+    await openLogsPanel(page, notebookNumber, state);
+    console.log(`Notebook ${notebookNumber}: Ctrl+Shift+R sent after recovery.`);
+  }
 }
 
 async function takeOverIfReader(page) {
@@ -389,14 +417,7 @@ async function takeOverIfReader(page) {
   console.log(reconnectBanner
     ? 'Reconnection banner appeared after Take over.'
     : 'No reconnection banner appeared after Take over.');
-  await saveScreenshot(page, 'after-takeover');
   return true;
-}
-
-async function saveScreenshot(page, name) {
-  const path = `artifacts/${name}.png`;
-  await page.screenshot({ path, fullPage: true });
-  console.log(`Screenshot saved: ${path}`);
 }
 
 async function main() {
@@ -413,6 +434,7 @@ async function main() {
   });
 
   const notebooks = [];
+  let recoveryUsed = false;
 
   try {
     for (let index = 0; index < NOTEBOOK_URLS.length; index++) {
@@ -422,35 +444,50 @@ async function main() {
       attachBrowserDiagnostics(page, notebookNumber, state);
       notebooks.push({ page, state, notebookNumber });
 
-      console.log(`Opening Molab notebook ${notebookNumber}/${NOTEBOOK_URLS.length}: ${NOTEBOOK_URLS[index]}`);
-      await page.goto(NOTEBOOK_URLS[index], { waitUntil: 'domcontentloaded', timeout: 60000 });
-      await page.waitForTimeout(5000);
-      await saveScreenshot(page, `notebook-${notebookNumber}-opened`);
-      await takeOverIfReader(page);
+      try {
+        console.log(`Opening Molab notebook ${notebookNumber}/${NOTEBOOK_URLS.length}: ${NOTEBOOK_URLS[index]}`);
+        await page.goto(NOTEBOOK_URLS[index], { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await page.waitForTimeout(5000);
+        await takeOverIfReader(page);
 
-      if (process.argv.includes('--visual-review')) {
-        await prepareVisualReview(page);
-        continue;
+        if (process.argv.includes('--visual-review')) {
+          await prepareVisualReview(page);
+          continue;
+        }
+
+        // A reconnected session keeps the run control disabled until this session
+        // restart is completed. Execution below targets the Run button directly.
+        await restartIfReconnected(page);
+        await recoverNotebook(page);
+
+        // Snapshot existing output before starting so old errors are not mistaken
+        // for errors from this run. Close Logs while interacting with the editor.
+        await openLogsPanel(page, notebookNumber, state);
+        state.lastSnapshot = await readNotebookLogs(page, state);
+        await page.keyboard.press('Control+j').catch(() => {});
+        await page.waitForTimeout(500);
+
+        const previewStarted = await startReadOnlyPreview(page);
+
+        if (!previewStarted) {
+          console.log(`Preparing notebook ${notebookNumber} execution...`);
+          const editor = await findNotebookEditor(page, 60000);
+          await editor.click();
+          await page.keyboard.press('Control+Shift+R');
+          console.log(`Notebook ${notebookNumber}: Ctrl+Shift+R sent while Logs is closed.`);
+        }
+
+        console.log(`Notebook ${notebookNumber}: waiting 10 seconds for execution to initialize.`);
+        await page.waitForTimeout(10000);
+        await openLogsPanel(page, notebookNumber, state);
+      } catch (error) {
+        const reason = error?.message || String(error);
+        appendLog(notebookNumber, `[automation action failed] ${reason}`);
+        if (recoveryUsed) throw new Error(`Setup failed again after one recovery: ${reason}`);
+        console.error(`Setup failed for notebook ${notebookNumber}: ${reason}`);
+        recoveryUsed = true;
+        await recoverAllNotebooks(notebooks);
       }
-
-      // A reconnected session keeps the run control disabled until this session
-      // restart is completed. Execution below targets the Run button directly.
-      await restartIfReconnected(page);
-      await recoverNotebook(page);
-      const previewStarted = await startReadOnlyPreview(page);
-
-      if (!previewStarted) {
-        console.log(`Preparing notebook ${notebookNumber} execution...`);
-        const editor = await findNotebookEditor(page, 60000);
-        await editor.click();
-        await page.keyboard.press('Control+Shift+R');
-        console.log(`Notebook ${notebookNumber}: Ctrl+Shift+R sent while Logs is closed.`);
-      }
-
-      // Opening the developer panel can make notebook controls inert. Start
-      // execution first, then open Logs for monitoring.
-      await openLogsPanel(page, notebookNumber, state);
-      await reportNewLogs(page, notebookNumber, state);
     }
 
     if (process.argv.includes('--visual-review')) return;
@@ -460,10 +497,20 @@ async function main() {
     let lastHeartbeatAt = Date.now();
     while (Date.now() < endTime) {
       await sleep(5000);
+      const issues = [];
       for (const { page, state, notebookNumber } of notebooks) {
         if (page.isClosed()) throw new Error(`Notebook ${notebookNumber} page was closed.`);
-        if (state.fatalError) throw new Error(`Notebook ${notebookNumber}: ${state.fatalError}`);
-        await reportNewLogs(page, notebookNumber, state);
+        const errors = await reportNewLogs(page, notebookNumber, state);
+        if (errors.length) issues.push(`Notebook ${notebookNumber} Logs: ${errors.join(' | ')}`);
+        if (state.fatalError) issues.push(`Notebook ${notebookNumber}: ${state.fatalError}`);
+      }
+      if (issues.length) {
+        if (recoveryUsed) {
+          throw new Error(`Still failing after one recovery. ${issues.join(' || ')}`);
+        }
+        console.error(`Execution error detected: ${issues.join(' || ')}`);
+        recoveryUsed = true;
+        await recoverAllNotebooks(notebooks);
       }
       if (Date.now() - lastHeartbeatAt >= 5 * 60 * 1000) {
         console.log(`Automation healthy; monitoring ${notebooks.length} notebook(s).`);
@@ -475,11 +522,6 @@ async function main() {
 
   } catch (error) {
     console.error('Automation error:', error);
-    for (const { page, notebookNumber } of notebooks) {
-      await saveScreenshot(page, `notebook-${notebookNumber}-error`).catch(screenshotError => {
-        console.error('Could not save error screenshot:', screenshotError.message);
-      });
-    }
     process.exitCode = 1;
 
   } finally {
