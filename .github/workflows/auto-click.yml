@@ -37,11 +37,17 @@ jobs:
         run: |
           mkdir -p artifacts
           run_log="${RUNNER_TEMP}/molab-run.log"
-          if xvfb-run -a node click.js > "$run_log" 2>&1; then
-            status=0
-          else
-            status=$?
-          fi
+          set +e
+          xvfb-run -a node click.js 2>&1 | tee "$run_log" | awk '
+            BEGIN { IGNORECASE = 1 }
+            /error|failed|exception|timeout|HTTP [45][0-9][0-9]|request failed|opening molab notebook|blue restart|confirm restart|red restart|restart confirmed|take over|preparing notebook|ctrl\+shift\+r|waiting 10 seconds|opened the logs panel|automation healthy|execution error detected|interrupting notebook|refreshing notebook/ {
+              if (length($0) > 1800) print substr($0, 1, 1800) " ... [truncated]"
+              else print
+              fflush()
+            }
+          '
+          status=${PIPESTATUS[0]}
+          set -e
           if [ "$status" -ne 0 ]; then
             echo "Automation stopped. Relevant Molab or browser errors:"
             grep -Ei 'error|failed|exception|timeout|HTTP [45][0-9][0-9]|request failed' "$run_log" | tail -n 80 | tee -a artifacts/automation-diagnostics.log || true
